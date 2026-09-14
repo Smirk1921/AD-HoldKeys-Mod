@@ -676,7 +676,7 @@ function Show-Status {
 
 try {
     $Script:Manifest = Read-JsonFile -Path $Script:ManifestPath
-    if ([string]$Script:Manifest.modVersion -ne "1.1.0") {
+    if ([string]$Script:Manifest.modVersion -ne "1.1.1") {
         throw "Unsupported mod manifest version."
     }
     $resolvedGameRoot = Resolve-GameRoot -RequestedRoot $GameRoot

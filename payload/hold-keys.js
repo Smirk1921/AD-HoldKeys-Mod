@@ -1,10 +1,13 @@
 (() => {
   "use strict";
 
-  const MOD_VERSION = "1.1.0";
+  const MOD_VERSION = "1.1.1";
   const INSTALL_FLAG = "__AD_HOLDKEYS_INSTALLED__";
   const STORAGE_KEY = "ad-holdkeys-ui-v1";
   const STOP_ALL_CODE = "F4";
+  const VIEWPORT_MARGIN = 12;
+  const MIN_EXPANDED_WIDTH = 260;
+  const MIN_EXPANDED_HEIGHT = 260;
 
   if (globalThis[INSTALL_FLAG]) return;
   globalThis[INSTALL_FLAG] = true;
@@ -58,6 +61,7 @@
   let activityDot;
   let collapseButton;
   let dragState;
+  let resizeFrame;
   let ipcRenderer;
 
   function readUiState() {
@@ -182,19 +186,39 @@
     for (const definition of [...keyDefinitions]) stopKey(definition);
   }
 
+  function isCompactPanel() {
+    return Boolean(panel) && (panel.classList.contains("is-minimized") ||
+      panel.classList.contains("is-auto-compact"));
+  }
+
+  function hasRoomForExpandedPanel() {
+    return window.innerWidth >= MIN_EXPANDED_WIDTH && window.innerHeight >= MIN_EXPANDED_HEIGHT;
+  }
+
+  function getPreferredPosition(state) {
+    if (typeof state.preferredX === "number" && typeof state.preferredY === "number") {
+      return { x: state.preferredX, y: state.preferredY };
+    }
+    if (typeof state.x === "number" && typeof state.y === "number") {
+      return { x: state.x, y: state.y };
+    }
+    return undefined;
+  }
+
   function clampPanelPosition(x, y) {
     const rect = panel.getBoundingClientRect();
-    const maxX = Math.max(0, window.innerWidth - rect.width);
-    const maxY = Math.max(0, window.innerHeight - rect.height);
+    const maxX = Math.max(VIEWPORT_MARGIN, window.innerWidth - rect.width - VIEWPORT_MARGIN);
+    const maxY = Math.max(VIEWPORT_MARGIN, window.innerHeight - rect.height - VIEWPORT_MARGIN);
     return {
-      x: Math.max(0, Math.min(x, maxX)),
-      y: Math.max(0, Math.min(y, maxY))
+      x: Math.max(VIEWPORT_MARGIN, Math.min(x, maxX)),
+      y: Math.max(VIEWPORT_MARGIN, Math.min(y, maxY))
     };
   }
 
   function applyExpandedPosition(state) {
-    if (typeof state.x === "number" && typeof state.y === "number") {
-      const position = clampPanelPosition(state.x, state.y);
+    const preferred = getPreferredPosition(state);
+    if (preferred) {
+      const position = clampPanelPosition(preferred.x, preferred.y);
       panel.style.left = `${position.x}px`;
       panel.style.top = `${position.y}px`;
       panel.style.right = "auto";
@@ -209,38 +233,60 @@
   }
 
   function saveExpandedPosition() {
-    if (!panel || panel.classList.contains("is-minimized")) return;
+    if (!panel || isCompactPanel()) return;
     const rect = panel.getBoundingClientRect();
-    writeUiState({ x: Math.round(rect.left), y: Math.round(rect.top) });
+    writeUiState({
+      preferredX: Math.round(rect.left),
+      preferredY: Math.round(rect.top)
+    });
   }
 
-  function updateMinimizedUi(minimized) {
-    if (titleElement) titleElement.textContent = minimized ? "长按" : "自动长按";
+  function updateCompactUi(compact, manuallyMinimized) {
+    if (titleElement) titleElement.textContent = compact ? "长按" : "自动长按";
     if (collapseButton) {
-      collapseButton.textContent = minimized ? "▸" : "—";
-      collapseButton.setAttribute("aria-label", minimized ? "展开面板" : "最小化面板");
+      collapseButton.hidden = compact && !manuallyMinimized;
+      collapseButton.textContent = manuallyMinimized ? "▸" : "—";
+      collapseButton.setAttribute("aria-label", manuallyMinimized ? "展开面板" : "最小化面板");
     }
-    if (panel) panel.setAttribute("aria-expanded", String(!minimized));
+    if (panel) panel.setAttribute("aria-expanded", String(!compact));
+  }
+
+  function relayoutPanel() {
+    if (!panel) return;
+    const state = readUiState();
+    const manuallyMinimized = state.minimized === true;
+    const autoCompact = !manuallyMinimized && !hasRoomForExpandedPanel();
+
+    panel.classList.toggle("is-minimized", manuallyMinimized);
+    panel.classList.toggle("is-auto-compact", autoCompact);
+
+    const compact = manuallyMinimized || autoCompact;
+    if (!compact) applyExpandedPosition(state);
+    updateCompactUi(compact, manuallyMinimized);
   }
 
   function setPanelMinimized(minimized, persist = true) {
     if (!panel) return;
 
-    if (minimized && !panel.classList.contains("is-minimized")) saveExpandedPosition();
-    panel.classList.toggle("is-minimized", minimized);
-    if (!minimized) applyExpandedPosition(readUiState());
-    updateMinimizedUi(minimized);
+    if (minimized && !isCompactPanel()) saveExpandedPosition();
     if (persist) writeUiState({ minimized });
+    relayoutPanel();
   }
 
   function restorePanelState() {
-    const state = readUiState();
-    applyExpandedPosition(state);
-    setPanelMinimized(state.minimized === true, false);
+    relayoutPanel();
+  }
+
+  function scheduleRelayout() {
+    if (resizeFrame !== undefined) return;
+    resizeFrame = window.requestAnimationFrame(() => {
+      resizeFrame = undefined;
+      relayoutPanel();
+    });
   }
 
   function beginDrag(event) {
-    if (panel.classList.contains("is-minimized") ||
+    if (isCompactPanel() ||
         event.button !== 0 || event.target.closest("button")) return;
 
     const rect = panel.getBoundingClientRect();
@@ -273,7 +319,10 @@
 
     panel.classList.remove("is-dragging");
     const rect = panel.getBoundingClientRect();
-    writeUiState({ x: Math.round(rect.left), y: Math.round(rect.top) });
+    writeUiState({
+      preferredX: Math.round(rect.left),
+      preferredY: Math.round(rect.top)
+    });
     dragState = undefined;
   }
 
@@ -354,6 +403,7 @@
     header.addEventListener("pointercancel", endDrag);
 
     collapseButton.addEventListener("click", () => {
+      if (panel.classList.contains("is-auto-compact")) return;
       setPanelMinimized(!panel.classList.contains("is-minimized"));
     });
 
@@ -400,13 +450,7 @@
     if (document.getElementById("ad-holdkeys-panel")) return;
     createPanel();
     window.addEventListener("keydown", handleGlobalKeydown, true);
-    window.addEventListener("resize", () => {
-      if (!panel || panel.classList.contains("is-minimized") || !panel.style.left) return;
-      const rect = panel.getBoundingClientRect();
-      const position = clampPanelPosition(rect.left, rect.top);
-      panel.style.left = `${position.x}px`;
-      panel.style.top = `${position.y}px`;
-    });
+    window.addEventListener("resize", scheduleRelayout);
     window.addEventListener("beforeunload", stopAll);
   }
 
@@ -417,6 +461,7 @@
     toggle: key => toggleKey(definitionsById.get(String(key).toLowerCase())),
     stopAll,
     setMinimized: value => setPanelMinimized(Boolean(value)),
+    relayout: relayoutPanel,
     activeKeys: () => [...activeKeys],
     __mainTick: dispatchHeartbeatPulse
   });

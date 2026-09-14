@@ -5,8 +5,12 @@
   right: auto;
   bottom: 12px;
   left: 12px;
+  margin: 0;
+  padding: 0;
   z-index: 2147483600;
   width: 224px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 24px);
   color: #f5f7ff;
   background: rgba(16, 19, 28, 0.95);
   border: 1px solid rgba(130, 154, 182, 0.55);
@@ -73,6 +77,8 @@
 }
 
 #ad-holdkeys-panel .ad-holdkeys__body {
+  max-height: calc(100vh - 52px);
+  overflow: auto;
   padding: 7px;
 }
 
@@ -178,15 +184,21 @@
   background: rgba(148, 43, 55, 0.9);
 }
 
-#ad-holdkeys-panel.is-minimized {
+#ad-holdkeys-panel.is-minimized,
+#ad-holdkeys-panel.is-auto-compact {
   width: 88px;
+  height: 32px;
+  min-height: 32px;
+  max-height: 32px;
+  overflow: hidden;
   left: 12px !important;
   right: auto !important;
   bottom: 12px !important;
   top: auto !important;
 }
 
-#ad-holdkeys-panel.is-minimized .ad-holdkeys__header {
+#ad-holdkeys-panel.is-minimized .ad-holdkeys__header,
+#ad-holdkeys-panel.is-auto-compact .ad-holdkeys__header {
   min-height: 30px;
   padding-right: 4px;
   cursor: default;
@@ -194,15 +206,18 @@
   border-radius: 9px;
 }
 
-#ad-holdkeys-panel.is-minimized .ad-holdkeys__body {
+#ad-holdkeys-panel.is-minimized .ad-holdkeys__body,
+#ad-holdkeys-panel.is-auto-compact .ad-holdkeys__body {
   display: none;
 }
 
-#ad-holdkeys-panel.is-minimized .ad-holdkeys__title {
+#ad-holdkeys-panel.is-minimized .ad-holdkeys__title,
+#ad-holdkeys-panel.is-auto-compact .ad-holdkeys__title {
   font-size: 11px;
 }
 
-#ad-holdkeys-panel.is-minimized .ad-holdkeys__collapse {
+#ad-holdkeys-panel.is-minimized .ad-holdkeys__collapse,
+#ad-holdkeys-panel.is-auto-compact .ad-holdkeys__collapse {
   width: 22px;
   font-size: 14px;
 }
