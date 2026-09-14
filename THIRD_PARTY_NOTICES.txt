@@ -1,0 +1,10 @@
+Third-party notices
+===================
+
+The ASAR reading and writing code in Manage-HoldKeys.ps1 was adapted from:
+
+  Antimatter Dimensions Simplified Chinese Patch
+  Copyright (c) 2026 Antimatter Dimensions Zh-CN Patch contributors
+  MIT License
+
+A copy of the MIT License is included in this directory as LICENSE.
