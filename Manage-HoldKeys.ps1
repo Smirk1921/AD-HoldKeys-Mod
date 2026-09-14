@@ -443,6 +443,22 @@ function Assert-CompatibleBase {
     }
 }
 
+function Copy-FileBytes {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    $input = [IO.File]::Open($Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $output = [IO.File]::Open($Destination, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $input.CopyTo($output)
+    }
+    finally {
+        $output.Dispose()
+        $input.Dispose()
+    }
+}
+
 function Ensure-BaseBackup {
     param([Parameter(Mandatory = $true)][string]$SourceAsar)
     $expected = ([string]$Script:Manifest.game.baseAsarSha256).ToUpperInvariant()
@@ -460,7 +476,7 @@ function Ensure-BaseBackup {
     }
     $temporary = Join-Path $Script:StateDirectory (".pre-holdkeys-app.{0}.tmp" -f [Guid]::NewGuid().ToString("N"))
     try {
-        [IO.File]::Copy($SourceAsar, $temporary, $false)
+        Copy-FileBytes -Source $SourceAsar -Destination $temporary
         if ((Get-Sha256 -Path $temporary) -ne $expected) {
             throw "Backup copy failed SHA-256 verification."
         }
@@ -519,6 +535,9 @@ function Install-HoldKeys {
 
     if ($currentHash -ne $baseHash) {
         if ($state -and [string]$state.patchedSha256 -and $currentHash -eq ([string]$state.patchedSha256).ToUpperInvariant()) {
+            if ([string]$state.modVersion -ne [string]$Script:Manifest.modVersion) {
+                throw "Another HoldKeys version is installed. Run the old uninstaller before installing $($Script:Manifest.modVersion)."
+            }
             Write-Step "The HoldKeys mod is already installed."
             $state.status = "installed"
             $state.updatedAt = [DateTime]::UtcNow.ToString("o")
@@ -592,7 +611,7 @@ function Uninstall-HoldKeys {
     Assert-GameNotRunning
     $temporary = Join-Path $resources (".app.asar.holdkeys-restore.{0}.tmp" -f [Guid]::NewGuid().ToString("N"))
     try {
-        [IO.File]::Copy($backupPath, $temporary, $false)
+        Copy-FileBytes -Source $backupPath -Destination $temporary
         if ((Get-Sha256 -Path $temporary) -ne $baseHash) {
             throw "Restore copy failed SHA-256 verification."
         }
@@ -657,7 +676,7 @@ function Show-Status {
 
 try {
     $Script:Manifest = Read-JsonFile -Path $Script:ManifestPath
-    if ([string]$Script:Manifest.modVersion -ne "1.0.0") {
+    if ([string]$Script:Manifest.modVersion -ne "1.1.0") {
         throw "Unsupported mod manifest version."
     }
     $resolvedGameRoot = Resolve-GameRoot -RequestedRoot $GameRoot

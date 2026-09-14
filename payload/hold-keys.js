@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const MOD_VERSION = "1.0.0";
+  const MOD_VERSION = "1.1.0";
   const INSTALL_FLAG = "__AD_HOLDKEYS_INSTALLED__";
   const STORAGE_KEY = "ad-holdkeys-ui-v1";
   const STOP_ALL_CODE = "F4";
@@ -53,9 +53,12 @@
   const activeKeys = new Set();
 
   let panel;
+  let titleElement;
   let statusElement;
+  let activityDot;
   let collapseButton;
   let dragState;
+  let ipcRenderer;
 
   function readUiState() {
     try {
@@ -72,6 +75,29 @@
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
     } catch {
       // UI persistence is optional and must never affect the game.
+    }
+  }
+
+  try {
+    ({ ipcRenderer } = require("electron"));
+  } catch {
+    ipcRenderer = undefined;
+  }
+
+  function syncMainHeartbeat() {
+    if (!ipcRenderer || typeof ipcRenderer.send !== "function") return;
+    try {
+      ipcRenderer.send("ad-holdkeys:heartbeat", activeKeys.size > 0);
+    } catch {
+      // A renderer-only fallback keeps the original game repeat loop working.
+    }
+  }
+
+  function dispatchHeartbeatPulse() {
+    for (const definition of keyDefinitions) {
+      if (!activeKeys.has(definition.id)) continue;
+      dispatchSyntheticKey(definition, "keyup");
+      dispatchSyntheticKey(definition, "keydown");
     }
   }
 
@@ -119,6 +145,7 @@
     const isAnyActive = activeLabels.length > 0;
 
     panel.classList.toggle("is-any-active", isAnyActive);
+    if (activityDot) activityDot.hidden = !isAnyActive;
     if (statusElement) {
       statusElement.textContent = isAnyActive
         ? `正在长按：${activeLabels.join(" · ")}`
@@ -130,6 +157,7 @@
     if (!definition || activeKeys.has(definition.id)) return;
     activeKeys.add(definition.id);
     updatePanel();
+    syncMainHeartbeat();
     dispatchSyntheticKey(definition, "keydown");
   }
 
@@ -140,6 +168,7 @@
     } finally {
       activeKeys.delete(definition.id);
       updatePanel();
+      syncMainHeartbeat();
     }
   }
 
@@ -163,21 +192,56 @@
     };
   }
 
-  function restorePanelState() {
-    const state = readUiState();
-
-    if (state.collapsed === true) panel.classList.add("is-collapsed");
+  function applyExpandedPosition(state) {
     if (typeof state.x === "number" && typeof state.y === "number") {
       const position = clampPanelPosition(state.x, state.y);
       panel.style.left = `${position.x}px`;
       panel.style.top = `${position.y}px`;
       panel.style.right = "auto";
       panel.style.bottom = "auto";
+      return;
     }
+
+    panel.style.left = "";
+    panel.style.top = "";
+    panel.style.right = "";
+    panel.style.bottom = "";
+  }
+
+  function saveExpandedPosition() {
+    if (!panel || panel.classList.contains("is-minimized")) return;
+    const rect = panel.getBoundingClientRect();
+    writeUiState({ x: Math.round(rect.left), y: Math.round(rect.top) });
+  }
+
+  function updateMinimizedUi(minimized) {
+    if (titleElement) titleElement.textContent = minimized ? "长按" : "自动长按";
+    if (collapseButton) {
+      collapseButton.textContent = minimized ? "▸" : "—";
+      collapseButton.setAttribute("aria-label", minimized ? "展开面板" : "最小化面板");
+    }
+    if (panel) panel.setAttribute("aria-expanded", String(!minimized));
+  }
+
+  function setPanelMinimized(minimized, persist = true) {
+    if (!panel) return;
+
+    if (minimized && !panel.classList.contains("is-minimized")) saveExpandedPosition();
+    panel.classList.toggle("is-minimized", minimized);
+    if (!minimized) applyExpandedPosition(readUiState());
+    updateMinimizedUi(minimized);
+    if (persist) writeUiState({ minimized });
+  }
+
+  function restorePanelState() {
+    const state = readUiState();
+    applyExpandedPosition(state);
+    setPanelMinimized(state.minimized === true, false);
   }
 
   function beginDrag(event) {
-    if (event.button !== 0 || event.target.closest("button")) return;
+    if (panel.classList.contains("is-minimized") ||
+        event.button !== 0 || event.target.closest("button")) return;
 
     const rect = panel.getBoundingClientRect();
     dragState = {
@@ -239,17 +303,25 @@
     header.className = "ad-holdkeys__header";
     header.dataset.dragHandle = "true";
 
-    const title = document.createElement("span");
-    title.className = "ad-holdkeys__title";
-    title.textContent = "自动长按";
+    titleElement = document.createElement("span");
+    titleElement.className = "ad-holdkeys__title";
+    titleElement.textContent = "自动长按";
+
+    activityDot = document.createElement("span");
+    activityDot.className = "ad-holdkeys__activity-dot";
+    activityDot.hidden = true;
+    activityDot.setAttribute("aria-hidden", "true");
 
     collapseButton = document.createElement("button");
     collapseButton.type = "button";
     collapseButton.className = "ad-holdkeys__collapse";
-    collapseButton.setAttribute("aria-label", "折叠或展开面板");
-    collapseButton.textContent = "−";
+    collapseButton.setAttribute("aria-label", "最小化面板");
+    collapseButton.textContent = "—";
 
-    header.append(title, collapseButton);
+    const headerActions = document.createElement("span");
+    headerActions.className = "ad-holdkeys__header-actions";
+    headerActions.append(activityDot, collapseButton);
+    header.append(titleElement, headerActions);
 
     const body = document.createElement("div");
     body.className = "ad-holdkeys__body";
@@ -282,9 +354,13 @@
     header.addEventListener("pointercancel", endDrag);
 
     collapseButton.addEventListener("click", () => {
-      const collapsed = panel.classList.toggle("is-collapsed");
-      collapseButton.textContent = collapsed ? "+" : "−";
-      writeUiState({ collapsed });
+      setPanelMinimized(!panel.classList.contains("is-minimized"));
+    });
+
+    header.addEventListener("click", event => {
+      if (panel.classList.contains("is-minimized") && !event.target.closest("button")) {
+        setPanelMinimized(false);
+      }
     });
 
     panel.addEventListener("click", event => {
@@ -299,7 +375,6 @@
     });
 
     restorePanelState();
-    collapseButton.textContent = panel.classList.contains("is-collapsed") ? "+" : "−";
     updatePanel();
   }
 
@@ -326,7 +401,7 @@
     createPanel();
     window.addEventListener("keydown", handleGlobalKeydown, true);
     window.addEventListener("resize", () => {
-      if (!panel || !panel.style.left) return;
+      if (!panel || panel.classList.contains("is-minimized") || !panel.style.left) return;
       const rect = panel.getBoundingClientRect();
       const position = clampPanelPosition(rect.left, rect.top);
       panel.style.left = `${position.x}px`;
@@ -341,7 +416,9 @@
     stop: key => stopKey(definitionsById.get(String(key).toLowerCase())),
     toggle: key => toggleKey(definitionsById.get(String(key).toLowerCase())),
     stopAll,
-    activeKeys: () => [...activeKeys]
+    setMinimized: value => setPanelMinimized(Boolean(value)),
+    activeKeys: () => [...activeKeys],
+    __mainTick: dispatchHeartbeatPulse
   });
 
   if (document.readyState === "loading") {

@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "modVersion": "1.0.0",
+  "modVersion": "1.1.0",
   "displayName": "Antimatter Dimensions HoldKeys Mod",
-  "indexMarker": "AD-HOLDKEYS-MOD:1.0.0",
+  "indexMarker": "AD-HOLDKEYS-MOD:1.1.0",
   "game": {
     "appId": "1399720",
     "buildId": "16370635",
@@ -13,16 +13,28 @@
   },
   "payload": [
     {
+      "source": "payload\\main.js",
+      "archivePath": "main.js",
+      "size": 3427,
+      "sha256": "9DE4C04D79F367C48848B78E0907831C191331D7B037C53011E049CE69A2A1AD"
+    },
+    {
+      "source": "payload\\hold-keys-main.js",
+      "archivePath": "AppFiles/js/hold-keys-main.js",
+      "size": 2372,
+      "sha256": "7371426000111FDA4B4B334663F0A8A1E4BB9F1B9DF5B1268852F72CA3B45AEF"
+    },
+    {
       "source": "payload\\hold-keys.js",
       "archivePath": "AppFiles/js/hold-keys.js",
-      "size": 10534,
-      "sha256": "6F547C21B76E109FFE4E6E41FE3B2CE7C5473109603E8B3D2BACA70E8AEE1887"
+      "size": 13110,
+      "sha256": "CD89BE94D6FB4A560CBA54023DBDFE5494D8E0556FF53A9B5C9E783B5EA067C3"
     },
     {
       "source": "payload\\hold-keys.css",
       "archivePath": "AppFiles/stylesheets/hold-keys.css",
-      "size": 3796,
-      "sha256": "DA77C086FD76B2A3FDCDB75A8EC18EFA7A39E7292EB1F1198591442D9E8101BB"
+      "size": 4552,
+      "sha256": "3EDA633621B120E0630020BD5FC8C9CF67EE872CA21E25CAAA1B199056D4C8B8"
     }
   ]
 }

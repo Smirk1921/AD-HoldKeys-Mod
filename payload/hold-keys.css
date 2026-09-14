@@ -2,8 +2,9 @@
   --ad-holdkeys-accent: #4fd1c5;
   --ad-holdkeys-accent-strong: #7fffd4;
   position: fixed;
-  right: 12px;
+  right: auto;
   bottom: 12px;
+  left: 12px;
   z-index: 2147483600;
   width: 224px;
   color: #f5f7ff;
@@ -33,6 +34,20 @@
   border-radius: 9px 9px 0 0;
   background: rgba(38, 45, 61, 0.84);
   touch-action: none;
+}
+
+#ad-holdkeys-panel .ad-holdkeys__header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+#ad-holdkeys-panel .ad-holdkeys__activity-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ad-holdkeys-accent-strong);
+  box-shadow: 0 0 8px rgba(127, 255, 212, 0.8);
 }
 
 #ad-holdkeys-panel .ad-holdkeys__title {
@@ -163,12 +178,33 @@
   background: rgba(148, 43, 55, 0.9);
 }
 
-#ad-holdkeys-panel.is-collapsed {
-  width: 158px;
+#ad-holdkeys-panel.is-minimized {
+  width: 88px;
+  left: 12px !important;
+  right: auto !important;
+  bottom: 12px !important;
+  top: auto !important;
 }
 
-#ad-holdkeys-panel.is-collapsed .ad-holdkeys__body {
+#ad-holdkeys-panel.is-minimized .ad-holdkeys__header {
+  min-height: 30px;
+  padding-right: 4px;
+  cursor: default;
+  border-bottom: 0;
+  border-radius: 9px;
+}
+
+#ad-holdkeys-panel.is-minimized .ad-holdkeys__body {
   display: none;
+}
+
+#ad-holdkeys-panel.is-minimized .ad-holdkeys__title {
+  font-size: 11px;
+}
+
+#ad-holdkeys-panel.is-minimized .ad-holdkeys__collapse {
+  width: 22px;
+  font-size: 14px;
 }
 
 #ad-holdkeys-panel.is-dragging {
