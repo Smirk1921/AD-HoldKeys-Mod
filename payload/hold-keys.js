@@ -1,13 +1,14 @@
 (() => {
   "use strict";
 
-  const MOD_VERSION = "1.1.1";
+  const MOD_VERSION = "1.2.0";
   const INSTALL_FLAG = "__AD_HOLDKEYS_INSTALLED__";
-  const STORAGE_KEY = "ad-holdkeys-ui-v1";
+  const STORAGE_KEY = "ad-holdkeys-ui-v2";
+  const LEGACY_STORAGE_KEYS = ["ad-holdkeys-ui-v1"];
   const STOP_ALL_CODE = "F4";
   const VIEWPORT_MARGIN = 12;
   const MIN_EXPANDED_WIDTH = 260;
-  const MIN_EXPANDED_HEIGHT = 260;
+  const MIN_EXPANDED_HEIGHT = 300;
 
   if (globalThis[INSTALL_FLAG]) return;
   globalThis[INSTALL_FLAG] = true;
@@ -48,6 +49,24 @@
       hotkey: "F9",
       hotkeyCode: "F9",
       label: "反物质星系"
+    },
+    {
+      id: "r",
+      key: "r",
+      code: "KeyR",
+      keyCode: 82,
+      hotkey: "F11",
+      hotkeyCode: "F11",
+      label: "复制器星系"
+    },
+    {
+      id: "e",
+      key: "e",
+      code: "KeyE",
+      keyCode: 69,
+      hotkey: "F12",
+      hotkeyCode: "F12",
+      label: "永恒"
     }
   ]);
 
@@ -79,6 +98,16 @@
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
     } catch {
       // UI persistence is optional and must never affect the game.
+    }
+  }
+
+  function removeLegacyUiState() {
+    for (const legacyKey of LEGACY_STORAGE_KEYS) {
+      try {
+        localStorage.removeItem(legacyKey);
+      } catch {
+        // Legacy cleanup is best-effort only.
+      }
     }
   }
 
@@ -448,6 +477,7 @@
 
   function install() {
     if (document.getElementById("ad-holdkeys-panel")) return;
+    removeLegacyUiState();
     createPanel();
     window.addEventListener("keydown", handleGlobalKeydown, true);
     window.addEventListener("resize", scheduleRelayout);

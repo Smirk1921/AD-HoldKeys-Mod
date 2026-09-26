@@ -11,6 +11,10 @@ param(
     [switch]$SkipProcessCheck
 )
 
+# Compatibility is decided by structural features (index anchors, required asar
+# entries, hotkey-binding signatures, mod markers), never by whole-file hashes,
+# so Chinese-patch or game updates do not invalidate the installer.
+
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 
@@ -25,11 +29,20 @@ else {
     $Script:StateDirectory = Join-Path $env:LOCALAPPDATA "AntimatterDimensionsHoldKeysMod"
 }
 $Script:StatePath = Join-Path $Script:StateDirectory "state.json"
+$Script:StateOriginalMainPath = Join-Path $Script:StateDirectory "original-main.js"
+$Script:SafetyBackupPath = Join-Path $Script:StateDirectory "pre-install-app.asar.bak"
 $Script:ProcessName = "Antimatter Dimensions"
+$Script:Utf8 = New-Object Text.UTF8Encoding($false)
+$Script:ModEntryPaths = @("AppFiles/js/hold-keys-main.js", "AppFiles/js/hold-keys.js", "AppFiles/stylesheets/hold-keys.css")
 
 function Write-Step {
     param([string]$Message)
     Write-Host "[AD HoldKeys] $Message"
+}
+
+function Write-Warning-Step {
+    param([string]$Message)
+    Write-Host "[AD HoldKeys] WARNING: $Message" -ForegroundColor Yellow
 }
 
 function Write-Failure {
@@ -152,18 +165,23 @@ function Resolve-GameRoot {
 }
 
 function Assert-PayloadIntegrity {
-    foreach ($payload in $Script:Manifest.payload) {
-        $source = Join-Path $Script:ModDirectory ([string]$payload.source)
+    $items = @()
+    foreach ($payload in @($Script:Manifest.payload)) { $items += $payload }
+    if ($Script:Manifest.PSObject.Properties["originalFiles"]) {
+        foreach ($original in @($Script:Manifest.originalFiles)) { $items += $original }
+    }
+    foreach ($item in $items) {
+        $source = Join-Path $Script:ModDirectory ([string]$item.source)
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
             throw "Mod payload is missing: $source"
         }
-        $item = Get-Item -LiteralPath $source
-        if ([int64]$item.Length -ne [int64]$payload.size) {
-            throw "Mod payload size failed verification: $($payload.source)"
+        $diskItem = Get-Item -LiteralPath $source
+        if ([int64]$diskItem.Length -ne [int64]$item.size) {
+            throw "Mod payload size failed verification: $($item.source)"
         }
         $actual = Get-Sha256 -Path $source
-        if ($actual -ne ([string]$payload.sha256).ToUpperInvariant()) {
-            throw "Mod payload failed SHA-256 verification: $($payload.source)"
+        if ($actual -ne ([string]$item.sha256).ToUpperInvariant()) {
+            throw "Mod payload failed SHA-256 verification: $($item.source)"
         }
     }
 }
@@ -254,6 +272,24 @@ function Set-AsarEntry {
     }
 }
 
+function Remove-AsarEntry {
+    param(
+        [Parameter(Mandatory = $true)][object]$Tree,
+        [Parameter(Mandatory = $true)][string]$ArchivePath
+    )
+    $parts = @(@($ArchivePath -split '[\\/]') | Where-Object { $_ })
+    $files = $Tree.files
+    for ($index = 0; $index -lt $parts.Count - 1; $index += 1) {
+        $property = $files.PSObject.Properties[$parts[$index]]
+        if (-not $property) { return }
+        $childFiles = $property.Value.PSObject.Properties["files"]
+        if (-not $childFiles) { return }
+        $files = $childFiles.Value
+    }
+    $leaf = $parts[$parts.Count - 1]
+    $files.PSObject.Properties.Remove($leaf) | Out-Null
+}
+
 function Read-AsarFileBytes {
     param(
         [Parameter(Mandatory = $true)][string]$ArchivePath,
@@ -287,30 +323,14 @@ function Read-AsarFileBytes {
     }
 }
 
-function Build-PatchedIndex {
-    param([Parameter(Mandatory = $true)][byte[]]$OriginalBytes)
-    $encoding = New-Object Text.UTF8Encoding($false)
-    $html = $encoding.GetString($OriginalBytes)
-    if ($html.Contains([string]$Script:Manifest.indexMarker)) {
-        throw "The source index already contains this mod marker."
-    }
-    $scriptAnchor = '<script defer src="js/zh-cn-runtime.js"></script>'
-    if (-not $html.Contains($scriptAnchor)) {
-        throw "The supported Chinese-patch script anchor was not found in index.html."
-    }
-    $scriptBlock = $scriptAnchor + "`n" +
-        '  <!-- ' + [string]$Script:Manifest.indexMarker + ' -->' + "`n" +
-        '  <script defer src="js/hold-keys.js"></script>'
-    $html = $html.Replace($scriptAnchor, $scriptBlock)
-
-    $styleAnchor = '<link rel="stylesheet" type="text/css" href="stylesheets/zh-cn.css">'
-    if (-not $html.Contains($styleAnchor)) {
-        throw "The supported Chinese-patch stylesheet anchor was not found in index.html."
-    }
-    $styleBlock = $styleAnchor + "`n" +
-        '  <link rel="stylesheet" type="text/css" href="stylesheets/hold-keys.css">'
-    $html = $html.Replace($styleAnchor, $styleBlock)
-    return ,$encoding.GetBytes($html)
+function Read-AsarText {
+    param(
+        [Parameter(Mandatory = $true)][string]$AsarPath,
+        [Parameter(Mandatory = $true)][object]$Header,
+        [Parameter(Mandatory = $true)][string]$InternalPath
+    )
+    $bytes = Read-AsarFileBytes -ArchivePath $AsarPath -Header $Header -InternalPath $InternalPath
+    return $Script:Utf8.GetString($bytes)
 }
 
 function Copy-StreamRange {
@@ -330,28 +350,289 @@ function Copy-StreamRange {
     }
 }
 
-function Build-PatchedAsar {
+function Copy-FileBytes {
     param(
-        [Parameter(Mandatory = $true)][string]$OriginalPath,
-        [Parameter(Mandatory = $true)][string]$OutputPath
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    $input = [IO.File]::Open($Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $output = [IO.File]::Open($Destination, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $input.CopyTo($output)
+    }
+    finally {
+        $output.Dispose()
+        $input.Dispose()
+    }
+}
+
+function Replace-FileAtomically {
+    param(
+        [Parameter(Mandatory = $true)][string]$Replacement,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    $directory = Split-Path -Parent $Destination
+    $rollback = Join-Path $directory (".ad-holdkeys-rollback-{0}.asar" -f [Guid]::NewGuid().ToString("N"))
+    [IO.File]::Replace($Replacement, $Destination, $rollback, $true)
+    if (Test-Path -LiteralPath $rollback -PathType Leaf) {
+        Remove-Item -LiteralPath $rollback -Force
+    }
+}
+
+function Assert-GameNotRunning {
+    if ($SkipProcessCheck) { return }
+    $running = @(Get-Process -Name $Script:ProcessName -ErrorAction SilentlyContinue)
+    if ($running.Count -gt 0) {
+        throw "Antimatter Dimensions is running. Fully exit the game and run this action again."
+    }
+}
+
+function Get-VerifiedPayloadBytes {
+    param([Parameter(Mandatory = $true)][string]$ArchivePath)
+    foreach ($payload in @($Script:Manifest.payload)) {
+        if ([string]$payload.archivePath -ne $ArchivePath) { continue }
+        $source = Join-Path $Script:ModDirectory ([string]$payload.source)
+        $bytes = [IO.File]::ReadAllBytes($source)
+        if ($bytes.LongLength -ne [int64]$payload.size) {
+            throw "Payload size failed verification: $($payload.source)"
+        }
+        if ((Get-BytesSha256 -Bytes $bytes) -ne ([string]$payload.sha256).ToUpperInvariant()) {
+            throw "Payload failed SHA-256 verification: $($payload.source)"
+        }
+        return ,$bytes
+    }
+    throw "Manifest payload entry was not found: $ArchivePath"
+}
+
+function Get-VerifiedOriginalMainBytes {
+    $original = $null
+    foreach ($item in @($Script:Manifest.originalFiles)) {
+        if ([string]$item.archivePath -eq "main.js") { $original = $item; break }
+    }
+    if (-not $original) { throw "Manifest has no original main.js copy to restore." }
+    $source = Join-Path $Script:ModDirectory ([string]$original.source)
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Original main.js copy is missing: $source" }
+    $bytes = [IO.File]::ReadAllBytes($source)
+    if ($bytes.LongLength -ne [int64]$original.size) { throw "Original main.js copy failed size verification." }
+    if ((Get-BytesSha256 -Bytes $bytes) -ne ([string]$original.sha256).ToUpperInvariant()) {
+        throw "Original main.js copy failed SHA-256 verification."
+    }
+    return ,$bytes
+}
+
+function Test-HotkeySignatures {
+    param([Parameter(Mandatory = $true)][string]$AppJsText)
+    $missing = @()
+    foreach ($signature in @($Script:Manifest.compat.hotkeySignatures)) {
+        if (-not $AppJsText.Contains([string]$signature)) { $missing += [string]$signature }
+    }
+    return $missing
+}
+
+function Get-ModFingerprint {
+    param([Parameter(Mandatory = $true)][string]$AsarPath)
+
+    $header = Read-AsarHeader -Path $AsarPath
+    $fingerprint = [pscustomobject]@{
+        Header = $header
+        Marker = $null
+        GameVersion = $null
+        ZhPatchPresent = $false
+        MainJsModded = $false
+        ModEntries = @()
+        MissingRequired = @()
+        MissingHotkeySignatures = @()
+    }
+
+    foreach ($required in @($Script:Manifest.compat.requiredEntries)) {
+        if (-not (Get-AsarEntry -Tree $header.Tree -ArchivePath ([string]$required))) {
+            $fingerprint.MissingRequired = @($fingerprint.MissingRequired + [string]$required)
+        }
+    }
+
+    $indexEntry = Get-AsarEntry -Tree $header.Tree -ArchivePath "AppFiles/index.html"
+    if ($indexEntry) {
+        $indexText = Read-AsarText -AsarPath $AsarPath -Header $header -InternalPath "AppFiles/index.html"
+        $markerMatch = [regex]::Match($indexText, "AD-HOLDKEYS-MOD:[0-9][0-9.]*")
+        if ($markerMatch.Success) { $fingerprint.Marker = $markerMatch.Value }
+        $fingerprint.ZhPatchPresent = $indexText.Contains("AD-ZH-CN-PATCH:")
+    }
+
+    $versionFile = [string]$Script:Manifest.game.versionFile
+    if (Get-AsarEntry -Tree $header.Tree -ArchivePath $versionFile) {
+        $versionText = (Read-AsarText -AsarPath $AsarPath -Header $header -InternalPath $versionFile).Trim()
+        try {
+            $versionJson = $versionText | ConvertFrom-Json
+            if ($versionJson -and $versionJson.PSObject.Properties["version"]) {
+                $versionText = [string]$versionJson.version
+            }
+        }
+        catch {
+            # version.txt is not JSON; use the raw text.
+        }
+        $fingerprint.GameVersion = $versionText
+    }
+
+    if (Get-AsarEntry -Tree $header.Tree -ArchivePath "main.js") {
+        $mainText = Read-AsarText -AsarPath $AsarPath -Header $header -InternalPath "main.js"
+        $fingerprint.MainJsModded = $mainText.Contains("hold-keys-main")
+    }
+
+    foreach ($entryPath in $Script:ModEntryPaths) {
+        if (Get-AsarEntry -Tree $header.Tree -ArchivePath $entryPath) {
+            $fingerprint.ModEntries = @($fingerprint.ModEntries + $entryPath)
+        }
+    }
+
+    if ($fingerprint.MissingRequired.Count -eq 0) {
+        $appJsText = Read-AsarText -AsarPath $AsarPath -Header $header -InternalPath "AppFiles/js/app.js"
+        $fingerprint.MissingHotkeySignatures = @(Test-HotkeySignatures -AppJsText $appJsText)
+    }
+
+    return $fingerprint
+}
+
+function Get-PayloadMismatches {
+    param(
+        [Parameter(Mandatory = $true)][string]$AsarPath,
+        [Parameter(Mandatory = $true)][object]$Header
+    )
+    $mismatches = @()
+    foreach ($payload in @($Script:Manifest.payload)) {
+        $entry = Get-AsarEntry -Tree $Header.Tree -ArchivePath ([string]$payload.archivePath)
+        $ok = $entry -ne $null -and [int64]$entry.size -eq [int64]$payload.size
+        if ($ok) {
+            $bytes = Read-AsarFileBytes -ArchivePath $AsarPath -Header $Header -InternalPath ([string]$payload.archivePath)
+            $ok = (Get-BytesSha256 -Bytes $bytes) -eq ([string]$payload.sha256).ToUpperInvariant()
+        }
+        if (-not $ok) { $mismatches = @($mismatches + [string]$payload.archivePath) }
+    }
+    return $mismatches
+}
+
+function ConvertTo-ModdedMainJsText {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    if ($Text.Contains("hold-keys-main")) { throw "main.js already contains HoldKeys hooks." }
+
+    if ($Text.Contains("`r`n")) { $nl = "`r`n" } else { $nl = "`n" }
+
+    $requireAnchor = "const path = require('path')"
+    $commentAnchor = "  // and load the index.html of the app."
+    if (-not $Text.Contains($requireAnchor)) { throw "main.js anchor was not found: '$requireAnchor'." }
+    if (-not $Text.Contains($commentAnchor)) { throw "main.js anchor was not found: '$commentAnchor'." }
+
+    $hookBlock = "const holdKeysMain = require('./AppFiles/js/hold-keys-main')" + $nl +
+        $nl +
+        "app.commandLine.appendSwitch('disable-background-timer-throttling')" + $nl +
+        "app.commandLine.appendSwitch('disable-renderer-backgrounding')" + $nl +
+        "app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')" + $nl +
+        "holdKeysMain.install()" + $nl
+    $attachBlock = "  holdKeysMain.attachWindow(mainWindow)" + $nl + $nl
+
+    $Text = $Text.Replace($requireAnchor + $nl, $requireAnchor + $nl + $hookBlock)
+    $Text = $Text.Replace($commentAnchor, $attachBlock + $commentAnchor)
+
+    if (-not $Text.Contains("holdKeysMain.install()") -or
+        -not $Text.Contains("holdKeysMain.attachWindow(mainWindow)")) {
+        throw "main.js hook injection failed verification."
+    }
+    return $Text
+}
+
+function ConvertTo-OriginalMainJsText {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $requireHook = "const holdKeysMain = require('./AppFiles/js/hold-keys-main')"
+    if (-not $Text.Contains($requireHook) -or
+        -not $Text.Contains("holdKeysMain.install()") -or
+        -not $Text.Contains("holdKeysMain.attachWindow(mainWindow)")) {
+        throw "main.js does not match the known HoldKeys hook pattern."
+    }
+
+    $requirePattern = [regex]::Escape($requireHook) +
+        "\r?\n\r?\napp\.commandLine\.appendSwitch\('disable-background-timer-throttling'\)\r?\n" +
+        "app\.commandLine\.appendSwitch\('disable-renderer-backgrounding'\)\r?\n" +
+        "app\.commandLine\.appendSwitch\('disable-backgrounding-occluded-windows'\)\r?\n" +
+        "holdKeysMain\.install\(\)\r?\n"
+    $Text = [regex]::Replace($Text, $requirePattern, "")
+    $Text = [regex]::Replace($Text, "[ \t]*holdKeysMain\.attachWindow\(mainWindow\)\r?\n\r?\n", "")
+
+    if ($Text.Contains("hold-keys")) { throw "HoldKeys remnants remain in main.js after stripping." }
+    if (-not $Text.Contains("function createWindow")) { throw "Stripped main.js failed a sanity check." }
+    return $Text
+}
+
+function ConvertTo-PatchedIndexText {
+    param([Parameter(Mandatory = $true)][string]$Html)
+    if ($Html.Contains("AD-HOLDKEYS-MOD:")) { throw "index.html already contains a HoldKeys marker." }
+    if ($Html.Contains("js/hold-keys.js") -or $Html.Contains("stylesheets/hold-keys.css")) {
+        throw "index.html already references HoldKeys assets."
+    }
+
+    if ($Html.Contains("`r`n")) { $nl = "`r`n" } else { $nl = "`n" }
+    $markerComment = "  <!-- " + [string]$Script:Manifest.indexMarker + " -->"
+    $scriptAnchor = [string]$Script:Manifest.compat.scriptAnchor
+    if (-not $Html.Contains($scriptAnchor)) {
+        throw ("The game script anchor was not found in index.html: " + $scriptAnchor)
+    }
+    $Html = $Html.Replace($scriptAnchor, $scriptAnchor + $nl + $markerComment + $nl + "  " + [string]$Script:Manifest.compat.modScriptTag)
+
+    $styleAnchor = [string]$Script:Manifest.compat.styleAnchor
+    if (-not $Html.Contains($styleAnchor)) {
+        throw ("The style anchor was not found in index.html: " + $styleAnchor)
+    }
+    $Html = $Html.Replace($styleAnchor, "  " + [string]$Script:Manifest.compat.modStyleTag + $nl + $styleAnchor)
+    return $Html
+}
+
+function ConvertTo-UpgradedIndexText {
+    param(
+        [Parameter(Mandatory = $true)][string]$Html,
+        [Parameter(Mandatory = $true)][string]$FromMarker
+    )
+    $oldComment = "<!-- " + $FromMarker + " -->"
+    $newComment = "<!-- " + [string]$Script:Manifest.indexMarker + " -->"
+    $count = [regex]::Matches($Html, [regex]::Escape($oldComment)).Count
+    if ($count -ne 1) {
+        throw ("Expected exactly one '{0}' comment in index.html, found {1}." -f $oldComment, $count)
+    }
+    return $Html.Replace($oldComment, $newComment)
+}
+
+function ConvertTo-StrippedIndexText {
+    param([Parameter(Mandatory = $true)][string]$Html)
+    $scriptPattern = '\r?\n[ \t]*<!-- AD-HOLDKEYS-MOD:[0-9.]+ -->\r?\n[ \t]*<script defer src="js/hold-keys\.js"></script>'
+    $linkPattern = '[ \t]*<link rel="stylesheet" type="text/css" href="stylesheets/hold-keys\.css">\r?\n'
+    $Html = [regex]::Replace($Html, $scriptPattern, "")
+    $Html = [regex]::Replace($Html, $linkPattern, "")
+    if ($Html.Contains("AD-HOLDKEYS-MOD:") -or $Html.Contains("hold-keys")) {
+        throw "Unrecognized HoldKeys remnants remain in index.html; refusing to finish the uninstall."
+    }
+    return $Html
+}
+
+function Build-AsarVariant {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceAsar,
+        [Parameter(Mandatory = $true)][string]$OutputPath,
+        [Parameter(Mandatory = $true)][byte[]]$IndexBytes,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$EntryUpdates
     )
     Assert-PayloadIntegrity
-    $header = Read-AsarHeader -Path $OriginalPath
+    $header = Read-AsarHeader -Path $SourceAsar
     $originalDataLength = [int64]$header.ArchiveLength - [int64]$header.DataOffset
-    $indexBytes = Read-AsarFileBytes -ArchivePath $OriginalPath -Header $header -InternalPath "AppFiles/index.html"
-    $patchedIndex = Build-PatchedIndex -OriginalBytes $indexBytes
 
     $appendItems = New-Object Collections.ArrayList
-    [void]$appendItems.Add([pscustomobject]@{
-        ArchivePath = "AppFiles/index.html"
-        Bytes = $patchedIndex
-    })
-    foreach ($payload in $Script:Manifest.payload) {
-        $source = Join-Path $Script:ModDirectory ([string]$payload.source)
-        [void]$appendItems.Add([pscustomobject]@{
-            ArchivePath = [string]$payload.archivePath
-            Bytes = [IO.File]::ReadAllBytes($source)
-        })
+    [void]$appendItems.Add([pscustomobject]@{ ArchivePath = "AppFiles/index.html"; Bytes = $IndexBytes })
+    foreach ($update in $EntryUpdates) {
+        if ([bool]$update.Remove) {
+            Remove-AsarEntry -Tree $header.Tree -ArchivePath ([string]$update.ArchivePath)
+        }
+        else {
+            [void]$appendItems.Add([pscustomobject]@{
+                ArchivePath = [string]$update.ArchivePath
+                Bytes = [byte[]]$update.Bytes
+            })
+        }
     }
 
     $nextOffset = $originalDataLength
@@ -365,13 +646,12 @@ function Build-PatchedAsar {
     }
 
     $headerJson = $header.Tree | ConvertTo-Json -Depth 100 -Compress
-    $encoding = New-Object Text.UTF8Encoding($false)
-    $headerBytes = $encoding.GetBytes($headerJson)
+    $headerBytes = $Script:Utf8.GetBytes($headerJson)
     $paddedLength = [int](($headerBytes.Length + 3) -band -4)
 
-    $input = [IO.File]::Open($OriginalPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $input = [IO.File]::Open($SourceAsar, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     $output = [IO.File]::Open($OutputPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-    $writer = New-Object IO.BinaryWriter($output, $encoding, $true)
+    $writer = New-Object IO.BinaryWriter($output, $Script:Utf8, $true)
     try {
         $writer.Write([uint32]4)
         $writer.Write([uint32](8 + $paddedLength))
@@ -397,129 +677,277 @@ function Build-PatchedAsar {
     }
 }
 
-function Assert-PatchedAsar {
+function Assert-InstalledAsar {
     param([Parameter(Mandatory = $true)][string]$Path)
     $header = Read-AsarHeader -Path $Path
-    foreach ($required in @("package.json", "main.js", "AppFiles/index.html", "AppFiles/js/app.js", "AppFiles/js/zh-cn-runtime.js")) {
-        if (-not (Get-AsarEntry -Tree $header.Tree -ArchivePath $required)) {
+    $requiredList = @(@($Script:Manifest.compat.requiredEntries) + $Script:ModEntryPaths)
+    foreach ($required in $requiredList) {
+        if (-not (Get-AsarEntry -Tree $header.Tree -ArchivePath ([string]$required))) {
             throw "Generated ASAR is missing a required game file: $required"
         }
     }
-    foreach ($payload in $Script:Manifest.payload) {
+    $indexText = Read-AsarText -AsarPath $Path -Header $header -InternalPath "AppFiles/index.html"
+    if (-not $indexText.Contains([string]$Script:Manifest.indexMarker)) {
+        throw "Generated ASAR does not contain the mod marker."
+    }
+    if (-not $indexText.Contains("js/hold-keys.js") -or -not $indexText.Contains("stylesheets/hold-keys.css")) {
+        throw "Generated ASAR index does not reference the mod assets."
+    }
+    foreach ($payload in @($Script:Manifest.payload)) {
         $entry = Get-AsarEntry -Tree $header.Tree -ArchivePath ([string]$payload.archivePath)
         if (-not $entry -or [int64]$entry.size -ne [int64]$payload.size) {
             throw "Generated ASAR has an invalid payload entry: $($payload.archivePath)"
         }
-        $payloadBytes = Read-AsarFileBytes -ArchivePath $Path -Header $header -InternalPath ([string]$payload.archivePath)
-        if ((Get-BytesSha256 -Bytes $payloadBytes) -ne ([string]$payload.sha256).ToUpperInvariant()) {
+        $bytes = Read-AsarFileBytes -ArchivePath $Path -Header $header -InternalPath ([string]$payload.archivePath)
+        if ((Get-BytesSha256 -Bytes $bytes) -ne ([string]$payload.sha256).ToUpperInvariant()) {
             throw "Generated ASAR failed payload verification: $($payload.archivePath)"
         }
     }
-    $indexBytes = Read-AsarFileBytes -ArchivePath $Path -Header $header -InternalPath "AppFiles/index.html"
-    $indexText = (New-Object Text.UTF8Encoding($false)).GetString($indexBytes)
-    if (-not $indexText.Contains([string]$Script:Manifest.indexMarker)) {
-        throw "Generated ASAR does not contain the mod marker."
+    $mainText = Read-AsarText -AsarPath $Path -Header $header -InternalPath "main.js"
+    if (-not $mainText.Contains("holdKeysMain.install()") -or
+        -not $mainText.Contains("holdKeysMain.attachWindow(mainWindow)")) {
+        throw "Generated ASAR main.js does not contain the HoldKeys hooks."
     }
 }
 
-function Assert-GameNotRunning {
-    if ($SkipProcessCheck) { return }
-    $running = @(Get-Process -Name $Script:ProcessName -ErrorAction SilentlyContinue)
-    if ($running.Count -gt 0) {
-        throw "Antimatter Dimensions is running. Fully exit the game and run this action again."
-    }
-}
-
-function Assert-CompatibleBase {
+function Assert-StrippedAsar {
     param([Parameter(Mandatory = $true)][string]$Path)
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "ASAR does not exist: $Path" }
-    $item = Get-Item -LiteralPath $Path
-    if ([int64]$item.Length -ne [int64]$Script:Manifest.game.baseAsarSize) {
-        throw "Unsupported app.asar size. Expected the current game build plus Chinese patch 0.3.2."
-    }
-    $actual = Get-Sha256 -Path $Path
-    if ($actual -ne ([string]$Script:Manifest.game.baseAsarSha256).ToUpperInvariant()) {
-        throw "Unsupported app.asar hash. This mod currently supports only game 11.5 + Chinese patch 0.3.2."
-    }
-}
-
-function Copy-FileBytes {
-    param(
-        [Parameter(Mandatory = $true)][string]$Source,
-        [Parameter(Mandatory = $true)][string]$Destination
-    )
-    $input = [IO.File]::Open($Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-    $output = [IO.File]::Open($Destination, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
-    try {
-        $input.CopyTo($output)
-    }
-    finally {
-        $output.Dispose()
-        $input.Dispose()
-    }
-}
-
-function Ensure-BaseBackup {
-    param([Parameter(Mandatory = $true)][string]$SourceAsar)
-    $expected = ([string]$Script:Manifest.game.baseAsarSha256).ToUpperInvariant()
-    $backupPath = Join-Path $Script:StateDirectory "pre-holdkeys-app.asar"
-
-    if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
-        if ((Get-Sha256 -Path $backupPath) -ne $expected) {
-            throw "The existing backup is not the supported base app.asar: $backupPath"
+    $header = Read-AsarHeader -Path $Path
+    foreach ($required in @($Script:Manifest.compat.requiredEntries)) {
+        if (-not (Get-AsarEntry -Tree $header.Tree -ArchivePath ([string]$required))) {
+            throw "Stripped ASAR is missing a required game file: $required"
         }
-        return $backupPath
     }
+    foreach ($entryPath in $Script:ModEntryPaths) {
+        if (Get-AsarEntry -Tree $header.Tree -ArchivePath $entryPath) {
+            throw "Stripped ASAR still contains a mod entry: $entryPath"
+        }
+    }
+    $indexText = Read-AsarText -AsarPath $Path -Header $header -InternalPath "AppFiles/index.html"
+    if ($indexText.Contains("AD-HOLDKEYS-MOD:") -or $indexText.Contains("hold-keys")) {
+        throw "Stripped ASAR still contains HoldKeys references in index.html."
+    }
+    $mainText = Read-AsarText -AsarPath $Path -Header $header -InternalPath "main.js"
+    if ($mainText.Contains("hold-keys")) {
+        throw "Stripped ASAR still contains HoldKeys hooks in main.js."
+    }
+}
 
+function New-SafetyBackup {
+    param([Parameter(Mandatory = $true)][string]$AsarPath)
+    if (Test-Path -LiteralPath $Script:SafetyBackupPath -PathType Leaf) {
+        Write-Step "A safety backup of a previous app.asar already exists: $Script:SafetyBackupPath"
+        return
+    }
     if (-not (Test-Path -LiteralPath $Script:StateDirectory -PathType Container)) {
         New-Item -ItemType Directory -Path $Script:StateDirectory -Force | Out-Null
     }
-    $temporary = Join-Path $Script:StateDirectory (".pre-holdkeys-app.{0}.tmp" -f [Guid]::NewGuid().ToString("N"))
-    try {
-        Copy-FileBytes -Source $SourceAsar -Destination $temporary
-        if ((Get-Sha256 -Path $temporary) -ne $expected) {
-            throw "Backup copy failed SHA-256 verification."
+    Write-Step "Creating a one-time full backup of the current app.asar..."
+    $sourceHash = Get-Sha256 -Path $AsarPath
+    Copy-FileBytes -Source $AsarPath -Destination $Script:SafetyBackupPath
+    if ((Get-Sha256 -Path $Script:SafetyBackupPath) -ne $sourceHash) {
+        throw "Safety backup failed SHA-256 verification."
+    }
+}
+
+function Write-StateOriginalMain {
+    param([Parameter(Mandatory = $true)][string]$OriginalText)
+    if ($OriginalText.Contains("hold-keys")) {
+        throw "Refusing to store a main.js copy that still contains HoldKeys hooks."
+    }
+    if (-not (Test-Path -LiteralPath $Script:StateDirectory -PathType Container)) {
+        New-Item -ItemType Directory -Path $Script:StateDirectory -Force | Out-Null
+    }
+    [IO.File]::WriteAllText($Script:StateOriginalMainPath, $OriginalText, $Script:Utf8)
+    return (Get-Sha256 -Path $Script:StateOriginalMainPath)
+}
+
+function Write-ModState {
+    param(
+        [Parameter(Mandatory = $true)][string]$ResolvedGameRoot,
+        [Parameter(Mandatory = $true)][string]$AsarPath,
+        [Parameter(Mandatory = $true)][string]$IndexStyle,
+        [AllowNull()][string]$OriginalMainSha256,
+        [Parameter(Mandatory = $true)][string]$Status
+    )
+    $existing = Get-ExistingState
+    $installedAt = [DateTime]::UtcNow.ToString("o")
+    if ($existing -and $existing.PSObject.Properties["installedAt"] -and $existing.installedAt) {
+        $installedAt = [string]$existing.installedAt
+    }
+    $state = [pscustomobject]@{
+        schemaVersion = 2
+        modVersion = [string]$Script:Manifest.modVersion
+        gameRoot = $ResolvedGameRoot
+        asarPath = $AsarPath
+        indexMarker = [string]$Script:Manifest.indexMarker
+        indexStyle = $IndexStyle
+        originalMainSha256 = $OriginalMainSha256
+        status = $Status
+        installedAt = $installedAt
+        updatedAt = [DateTime]::UtcNow.ToString("o")
+    }
+    Write-JsonFileAtomic -Value $state -Path $Script:StatePath
+    return $state
+}
+
+function Install-AlreadyCurrent {
+    param(
+        [Parameter(Mandatory = $true)][string]$ResolvedGameRoot,
+        [Parameter(Mandatory = $true)][string]$AsarPath,
+        [Parameter(Mandatory = $true)][object]$Fingerprint
+    )
+    $mismatches = @(Get-PayloadMismatches -AsarPath $AsarPath -Header $Fingerprint.Header)
+    if ($mismatches.Count -gt 0) {
+        throw ("This HoldKeys version is installed, but these entries do not match the manifest: " +
+            ($mismatches -join ", ") + ". Run the uninstaller first.")
+    }
+    if (-not $Fingerprint.MainJsModded) {
+        throw "index.html has the current marker, but main.js is missing the HoldKeys hooks. Run the uninstaller first."
+    }
+    $existing = Get-ExistingState
+    $indexStyle = "unknown"
+    if ($existing -and $existing.PSObject.Properties["indexStyle"] -and $existing.indexStyle) {
+        $indexStyle = [string]$existing.indexStyle
+    }
+    $originalMainSha = $null
+    if ((Test-Path -LiteralPath $Script:StateOriginalMainPath -PathType Leaf) -and
+        $existing -and $existing.PSObject.Properties["originalMainSha256"] -and $existing.originalMainSha256) {
+        if ((Get-Sha256 -Path $Script:StateOriginalMainPath) -eq ([string]$existing.originalMainSha256).ToUpperInvariant()) {
+            $originalMainSha = [string]$existing.originalMainSha256
         }
-        [IO.File]::Move($temporary, $backupPath)
+    }
+    Write-ModState -ResolvedGameRoot $ResolvedGameRoot -AsarPath $AsarPath -IndexStyle $indexStyle -OriginalMainSha256 $originalMainSha -Status "installed"
+    Write-Step "The HoldKeys mod is already installed at this version."
+}
+
+function Install-Upgrade {
+    param(
+        [Parameter(Mandatory = $true)][string]$ResolvedGameRoot,
+        [Parameter(Mandatory = $true)][string]$AsarPath,
+        [Parameter(Mandatory = $true)][object]$Fingerprint
+    )
+    Write-Step ("Upgrading in place from {0} to {1}..." -f $Fingerprint.Marker, $Script:Manifest.indexMarker)
+
+    foreach ($entryPath in $Script:ModEntryPaths) {
+        if (-not (Get-AsarEntry -Tree $Fingerprint.Header.Tree -ArchivePath $entryPath)) {
+            throw "Cannot upgrade: existing mod entry is missing: $entryPath"
+        }
+    }
+    if (-not $Fingerprint.MainJsModded) {
+        throw "Cannot upgrade: main.js is missing the HoldKeys hooks."
+    }
+
+    New-SafetyBackup -AsarPath $AsarPath
+
+    $indexText = Read-AsarText -AsarPath $AsarPath -Header $Fingerprint.Header -InternalPath "AppFiles/index.html"
+    $upgradedIndexText = ConvertTo-UpgradedIndexText -Html $indexText -FromMarker ([string]$Fingerprint.Marker)
+
+    $mainText = Read-AsarText -AsarPath $AsarPath -Header $Fingerprint.Header -InternalPath "main.js"
+    $originalMainSha = $null
+    try {
+        if ($mainText.Contains("hold-keys-main")) {
+            $originalMainText = ConvertTo-OriginalMainJsText -Text $mainText
+        }
+        else {
+            $originalMainText = $mainText
+        }
+        $originalMainSha = Write-StateOriginalMain -OriginalText $originalMainText
+    }
+    catch {
+        Write-Warning-Step ("Could not pre-compute an original main.js copy for future uninstalls: {0}" -f $_.Exception.Message)
+    }
+
+    $updates = @(
+        [pscustomobject]@{ ArchivePath = "AppFiles/js/hold-keys.js"; Bytes = (Get-VerifiedPayloadBytes -ArchivePath "AppFiles/js/hold-keys.js"); Remove = $false },
+        [pscustomobject]@{ ArchivePath = "AppFiles/stylesheets/hold-keys.css"; Bytes = (Get-VerifiedPayloadBytes -ArchivePath "AppFiles/stylesheets/hold-keys.css"); Remove = $false }
+    )
+
+    $resources = Split-Path -Parent $AsarPath
+    $temporary = Join-Path $resources (".app.asar.holdkeys.{0}.tmp" -f [Guid]::NewGuid().ToString("N"))
+    try {
+        Write-Step "Building the upgraded app.asar..."
+        Build-AsarVariant -SourceAsar $AsarPath -OutputPath $temporary -IndexBytes $Script:Utf8.GetBytes($upgradedIndexText) -EntryUpdates $updates
+        Assert-InstalledAsar -Path $temporary
+        $patchedHash = Get-Sha256 -Path $temporary
+        [void](Write-ModState -ResolvedGameRoot $ResolvedGameRoot -AsarPath $AsarPath -IndexStyle "upgraded" -OriginalMainSha256 $originalMainSha -Status "installing")
+
+        Write-Step "Installing the upgraded app.asar..."
+        Replace-FileAtomically -Replacement $temporary -Destination $AsarPath
+        if ((Get-Sha256 -Path $AsarPath) -ne $patchedHash) {
+            throw "Installed app.asar failed final SHA-256 verification."
+        }
+        [void](Write-ModState -ResolvedGameRoot $ResolvedGameRoot -AsarPath $AsarPath -IndexStyle "upgraded" -OriginalMainSha256 $originalMainSha -Status "installed")
+        Write-Step ("Upgrade complete. Start the game and use F6/F7/F8/F9/F11/F12, or the on-screen panel.")
     }
     finally {
         if (Test-Path -LiteralPath $temporary -PathType Leaf) {
             Remove-Item -LiteralPath $temporary -Force
         }
     }
-    return $backupPath
 }
 
-function Replace-FileAtomically {
-    param(
-        [Parameter(Mandatory = $true)][string]$Replacement,
-        [Parameter(Mandatory = $true)][string]$Destination
-    )
-    $directory = Split-Path -Parent $Destination
-    $rollback = Join-Path $directory (".ad-holdkeys-rollback-{0}.asar" -f [Guid]::NewGuid().ToString("N"))
-    [IO.File]::Replace($Replacement, $Destination, $rollback, $true)
-    if (Test-Path -LiteralPath $rollback -PathType Leaf) {
-        Remove-Item -LiteralPath $rollback -Force
-    }
-}
-
-function New-StateObject {
+function Install-Fresh {
     param(
         [Parameter(Mandatory = $true)][string]$ResolvedGameRoot,
-        [Parameter(Mandatory = $true)][string]$BackupPath,
-        [Parameter(Mandatory = $true)][string]$PatchedSha256,
-        [Parameter(Mandatory = $true)][string]$Status
+        [Parameter(Mandatory = $true)][string]$AsarPath,
+        [Parameter(Mandatory = $true)][object]$Fingerprint
     )
-    return [pscustomobject]@{
-        schemaVersion = 1
-        modVersion = [string]$Script:Manifest.modVersion
-        gameRoot = $ResolvedGameRoot
-        asarPath = Join-Path $ResolvedGameRoot "resources\app.asar"
-        backupPath = $BackupPath
-        baseSha256 = [string]$Script:Manifest.game.baseAsarSha256
-        patchedSha256 = $PatchedSha256
-        status = $Status
-        updatedAt = [DateTime]::UtcNow.ToString("o")
+    Write-Step "Installing fresh (feature-based compatibility check)..."
+
+    if ($Fingerprint.MissingHotkeySignatures.Count -gt 0) {
+        throw ("This game build does not expose the required hotkey bindings " +
+                "(missing in AppFiles/js/app.js: " + ($Fingerprint.MissingHotkeySignatures -join ", ") + ").")
+    }
+    $expectedVersion = [string]$Script:Manifest.game.expectedVersion
+    if ($Fingerprint.GameVersion -and $Fingerprint.GameVersion -ne $expectedVersion) {
+        Write-Warning-Step ("Game version {0} differs from the tested version {1}; continuing because all structural checks passed." -f $Fingerprint.GameVersion, $expectedVersion)
+    }
+
+    New-SafetyBackup -AsarPath $AsarPath
+
+    $mainText = Read-AsarText -AsarPath $AsarPath -Header $Fingerprint.Header -InternalPath "main.js"
+    if ($mainText.Contains("hold-keys-main")) {
+        throw "main.js already contains HoldKeys hooks. Run the uninstaller first."
+    }
+    $moddedMainText = ConvertTo-ModdedMainJsText -Text $mainText
+
+    $indexText = Read-AsarText -AsarPath $AsarPath -Header $Fingerprint.Header -InternalPath "AppFiles/index.html"
+    if ($indexText.Contains("js/hold-keys.js") -or $indexText.Contains("stylesheets/hold-keys.css")) {
+        throw "index.html already references HoldKeys assets. Run the uninstaller first."
+    }
+    $patchedIndexText = ConvertTo-PatchedIndexText -Html $indexText
+
+    $originalMainSha = Write-StateOriginalMain -OriginalText $mainText
+
+    $updates = @(
+        [pscustomobject]@{ ArchivePath = "main.js"; Bytes = $Script:Utf8.GetBytes($moddedMainText); Remove = $false },
+        [pscustomobject]@{ ArchivePath = "AppFiles/js/hold-keys-main.js"; Bytes = (Get-VerifiedPayloadBytes -ArchivePath "AppFiles/js/hold-keys-main.js"); Remove = $false },
+        [pscustomobject]@{ ArchivePath = "AppFiles/js/hold-keys.js"; Bytes = (Get-VerifiedPayloadBytes -ArchivePath "AppFiles/js/hold-keys.js"); Remove = $false },
+        [pscustomobject]@{ ArchivePath = "AppFiles/stylesheets/hold-keys.css"; Bytes = (Get-VerifiedPayloadBytes -ArchivePath "AppFiles/stylesheets/hold-keys.css"); Remove = $false }
+    )
+
+    $resources = Split-Path -Parent $AsarPath
+    $temporary = Join-Path $resources (".app.asar.holdkeys.{0}.tmp" -f [Guid]::NewGuid().ToString("N"))
+    try {
+        Write-Step "Building the patched app.asar..."
+        Build-AsarVariant -SourceAsar $AsarPath -OutputPath $temporary -IndexBytes $Script:Utf8.GetBytes($patchedIndexText) -EntryUpdates $updates
+        Assert-InstalledAsar -Path $temporary
+        $patchedHash = Get-Sha256 -Path $temporary
+        [void](Write-ModState -ResolvedGameRoot $ResolvedGameRoot -AsarPath $AsarPath -IndexStyle "anchor" -OriginalMainSha256 $originalMainSha -Status "installing")
+
+        Write-Step "Installing the patched app.asar..."
+        Replace-FileAtomically -Replacement $temporary -Destination $AsarPath
+        if ((Get-Sha256 -Path $AsarPath) -ne $patchedHash) {
+            throw "Installed app.asar failed final SHA-256 verification."
+        }
+        [void](Write-ModState -ResolvedGameRoot $ResolvedGameRoot -AsarPath $AsarPath -IndexStyle "anchor" -OriginalMainSha256 $originalMainSha -Status "installed")
+        Write-Step ("Installed successfully. Start the game and use F6/F7/F8/F9/F11/F12, or the on-screen panel.")
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) {
+            Remove-Item -LiteralPath $temporary -Force
+        }
     }
 }
 
@@ -528,105 +956,124 @@ function Install-HoldKeys {
     Assert-GameNotRunning
 
     $asarPath = Join-Path $ResolvedGameRoot "resources\app.asar"
-    $resources = Split-Path -Parent $asarPath
-    $baseHash = ([string]$Script:Manifest.game.baseAsarSha256).ToUpperInvariant()
-    $currentHash = Get-Sha256 -Path $asarPath
-    $state = Get-ExistingState
+    $fingerprint = Get-ModFingerprint -AsarPath $asarPath
 
-    if ($currentHash -ne $baseHash) {
-        if ($state -and [string]$state.patchedSha256 -and $currentHash -eq ([string]$state.patchedSha256).ToUpperInvariant()) {
-            if ([string]$state.modVersion -ne [string]$Script:Manifest.modVersion) {
-                throw "Another HoldKeys version is installed. Run the old uninstaller before installing $($Script:Manifest.modVersion)."
-            }
-            Write-Step "The HoldKeys mod is already installed."
-            $state.status = "installed"
-            $state.updatedAt = [DateTime]::UtcNow.ToString("o")
-            Write-JsonFileAtomic -Value $state -Path $Script:StatePath
-            return
-        }
-        throw "Current app.asar is not the supported base. Steam may have updated the game or the Chinese patch changed."
+    $patchState = "with the Chinese patch"
+    if (-not $fingerprint.ZhPatchPresent) { $patchState = "without the Chinese patch" }
+    $versionText = "?"
+    if ($fingerprint.GameVersion) { $versionText = $fingerprint.GameVersion }
+    Write-Step ("Detected game version {0} ({1}); mod marker '{2}'." -f $versionText, $patchState, $(if ($fingerprint.Marker) { $fingerprint.Marker } else { "none" }))
+
+    if ($fingerprint.MissingRequired.Count -gt 0) {
+        throw ("This does not look like a supported Antimatter Dimensions installation. Missing: " +
+            ($fingerprint.MissingRequired -join ", "))
     }
 
-    Assert-CompatibleBase -Path $asarPath
-    $backupPath = Ensure-BaseBackup -SourceAsar $asarPath
-    $temporary = Join-Path $resources (".app.asar.holdkeys.{0}.tmp" -f [Guid]::NewGuid().ToString("N"))
-    try {
-        Write-Step "Building a patched app.asar..."
-        Build-PatchedAsar -OriginalPath $asarPath -OutputPath $temporary
-        Assert-PatchedAsar -Path $temporary
-        $patchedHash = Get-Sha256 -Path $temporary
-        $installingState = New-StateObject -ResolvedGameRoot $ResolvedGameRoot -BackupPath $backupPath -PatchedSha256 $patchedHash -Status "installing"
-        Write-JsonFileAtomic -Value $installingState -Path $Script:StatePath
+    if ($fingerprint.Marker -eq [string]$Script:Manifest.indexMarker) {
+        Install-AlreadyCurrent -ResolvedGameRoot $ResolvedGameRoot -AsarPath $asarPath -Fingerprint $fingerprint
+        return
+    }
 
-        Write-Step "Installing the patched app.asar..."
-        Replace-FileAtomically -Replacement $temporary -Destination $asarPath
-        if ((Get-Sha256 -Path $asarPath) -ne $patchedHash) {
-            throw "Installed app.asar failed final SHA-256 verification."
+    if ($fingerprint.Marker) {
+        if (@($Script:Manifest.upgrade.knownMarkers) -notcontains [string]$fingerprint.Marker) {
+            throw ("Detected an unrecognized HoldKeys installation ({0}). Run its own uninstaller first." -f $fingerprint.Marker)
         }
-        $installedState = New-StateObject -ResolvedGameRoot $ResolvedGameRoot -BackupPath $backupPath -PatchedSha256 $patchedHash -Status "installed"
-        Write-JsonFileAtomic -Value $installedState -Path $Script:StatePath
-        Write-Step "Installed successfully. Start the game and use F6/F7/F8/F9, or the on-screen panel."
+        Install-Upgrade -ResolvedGameRoot $ResolvedGameRoot -AsarPath $asarPath -Fingerprint $fingerprint
+        return
     }
-    finally {
-        if (Test-Path -LiteralPath $temporary -PathType Leaf) {
-            Remove-Item -LiteralPath $temporary -Force
-        }
+
+    if ($fingerprint.ModEntries.Count -gt 0 -or $fingerprint.MainJsModded) {
+        throw "HoldKeys remnants were found without an index marker. Run Uninstall-HoldKeys.cmd to clean up first."
     }
+
+    Install-Fresh -ResolvedGameRoot $ResolvedGameRoot -AsarPath $asarPath -Fingerprint $fingerprint
 }
 
 function Uninstall-HoldKeys {
     param([Parameter(Mandatory = $true)][string]$ResolvedGameRoot)
     $asarPath = Join-Path $ResolvedGameRoot "resources\app.asar"
-    $resources = Split-Path -Parent $asarPath
-    $baseHash = ([string]$Script:Manifest.game.baseAsarSha256).ToUpperInvariant()
-    $currentHash = Get-Sha256 -Path $asarPath
-    $state = Get-ExistingState
+    $fingerprint = Get-ModFingerprint -AsarPath $asarPath
 
-    if (-not $state) {
-        if ($currentHash -eq $baseHash) {
-            Write-Step "The base app.asar is already active; nothing needs to be removed."
-            return
-        }
-        throw "HoldKeys state was not found. Refusing to overwrite the current app.asar."
+    if ($fingerprint.MissingRequired.Count -gt 0) {
+        throw ("Refusing to operate on an unrecognized installation. Missing: " +
+            ($fingerprint.MissingRequired -join ", "))
     }
 
-    if ($currentHash -eq $baseHash) {
-        $state.status = "uninstalled"
-        $state.updatedAt = [DateTime]::UtcNow.ToString("o")
-        Write-JsonFileAtomic -Value $state -Path $Script:StatePath
-        Write-Step "The base app.asar is already active."
+    if (-not $fingerprint.Marker -and $fingerprint.ModEntries.Count -eq 0 -and -not $fingerprint.MainJsModded) {
+        Write-Step "HoldKeys is not installed; nothing needs to be removed."
+        $state = Get-ExistingState
+        if ($state) {
+            $previousStyle = "unknown"
+            if ($state.PSObject.Properties["indexStyle"] -and $state.indexStyle) { $previousStyle = [string]$state.indexStyle }
+            $previousMainSha = $null
+            if ($state.PSObject.Properties["originalMainSha256"] -and $state.originalMainSha256) { $previousMainSha = [string]$state.originalMainSha256 }
+            [void](Write-ModState -ResolvedGameRoot $ResolvedGameRoot -AsarPath $asarPath -IndexStyle $previousStyle -OriginalMainSha256 $previousMainSha -Status "uninstalled")
+        }
         return
     }
 
-    $patchedHash = ([string]$state.patchedSha256).ToUpperInvariant()
-    if (-not $patchedHash -or $currentHash -ne $patchedHash) {
-        throw "Current app.asar does not match the archive installed by this mod. Refusing to overwrite it."
-    }
-
-    $backupPath = [string]$state.backupPath
-    if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or (Get-Sha256 -Path $backupPath) -ne $baseHash) {
-        throw "The verified base app.asar backup is unavailable: $backupPath"
-    }
-
     Assert-GameNotRunning
+    Write-Step "Removing HoldKeys (surgical uninstall)..."
+
+    $indexText = Read-AsarText -AsarPath $asarPath -Header $Fingerprint.Header -InternalPath "AppFiles/index.html"
+    $strippedIndexText = ConvertTo-StrippedIndexText -Html $indexText
+
+    $mainBytes = $null
+    if ($fingerprint.MainJsModded) {
+        $restoredBytes = $null
+        $state = Get-ExistingState
+        if ((Test-Path -LiteralPath $Script:StateOriginalMainPath -PathType Leaf) -and
+            $state -and $state.PSObject.Properties["originalMainSha256"] -and $state.originalMainSha256) {
+            if ((Get-Sha256 -Path $Script:StateOriginalMainPath) -eq ([string]$state.originalMainSha256).ToUpperInvariant()) {
+                $restoredBytes = [IO.File]::ReadAllBytes($Script:StateOriginalMainPath)
+                Write-Step "Restoring main.js from the state backup."
+            }
+            else {
+                Write-Warning-Step "The state main.js backup failed verification; falling back to pattern stripping."
+            }
+        }
+        if (-not $restoredBytes) {
+            try {
+                $mainText = Read-AsarText -AsarPath $asarPath -Header $Fingerprint.Header -InternalPath "main.js"
+                $restoredBytes = $Script:Utf8.GetBytes((ConvertTo-OriginalMainJsText -Text $mainText))
+                Write-Step "Restoring main.js by stripping the HoldKeys hooks."
+            }
+            catch {
+                Write-Warning-Step ("Pattern stripping failed ({0}); using the bundled original main.js." -f $_.Exception.Message)
+            }
+        }
+        if (-not $restoredBytes) {
+            $restoredBytes = Get-VerifiedOriginalMainBytes
+        }
+        $mainBytes = $restoredBytes
+    }
+    else {
+        $mainBytes = Read-AsarFileBytes -ArchivePath $asarPath -Header $Fingerprint.Header -InternalPath "main.js"
+    }
+
+    $updates = @(
+        [pscustomobject]@{ ArchivePath = "main.js"; Bytes = $mainBytes; Remove = $false },
+        [pscustomobject]@{ ArchivePath = "AppFiles/js/hold-keys-main.js"; Bytes = $null; Remove = $true },
+        [pscustomobject]@{ ArchivePath = "AppFiles/js/hold-keys.js"; Bytes = $null; Remove = $true },
+        [pscustomobject]@{ ArchivePath = "AppFiles/stylesheets/hold-keys.css"; Bytes = $null; Remove = $true }
+    )
+
+    $resources = Split-Path -Parent $asarPath
     $temporary = Join-Path $resources (".app.asar.holdkeys-restore.{0}.tmp" -f [Guid]::NewGuid().ToString("N"))
     try {
-        Copy-FileBytes -Source $backupPath -Destination $temporary
-        if ((Get-Sha256 -Path $temporary) -ne $baseHash) {
-            throw "Restore copy failed SHA-256 verification."
-        }
-        $state.status = "uninstalling"
-        $state.updatedAt = [DateTime]::UtcNow.ToString("o")
-        Write-JsonFileAtomic -Value $state -Path $Script:StatePath
+        Write-Step "Building the cleaned app.asar..."
+        Build-AsarVariant -SourceAsar $asarPath -OutputPath $temporary -IndexBytes $Script:Utf8.GetBytes($strippedIndexText) -EntryUpdates $updates
+        Assert-StrippedAsar -Path $temporary
+        $cleanHash = Get-Sha256 -Path $temporary
+        [void](Write-ModState -ResolvedGameRoot $ResolvedGameRoot -AsarPath $asarPath -IndexStyle "stripped" -OriginalMainSha256 $null -Status "uninstalling")
 
+        Write-Step "Installing the cleaned app.asar..."
         Replace-FileAtomically -Replacement $temporary -Destination $asarPath
-        if ((Get-Sha256 -Path $asarPath) -ne $baseHash) {
+        if ((Get-Sha256 -Path $asarPath) -ne $cleanHash) {
             throw "Restored app.asar failed final SHA-256 verification."
         }
-        $state.status = "uninstalled"
-        $state.updatedAt = [DateTime]::UtcNow.ToString("o")
-        Write-JsonFileAtomic -Value $state -Path $Script:StatePath
-        Write-Step "HoldKeys was removed and the base app.asar was restored."
+        [void](Write-ModState -ResolvedGameRoot $ResolvedGameRoot -AsarPath $asarPath -IndexStyle "stripped" -OriginalMainSha256 $null -Status "uninstalled")
+        Write-Step "HoldKeys was removed completely."
     }
     finally {
         if (Test-Path -LiteralPath $temporary -PathType Leaf) {
@@ -638,46 +1085,67 @@ function Uninstall-HoldKeys {
 function Show-Status {
     param([Parameter(Mandatory = $true)][string]$ResolvedGameRoot)
     $asarPath = Join-Path $ResolvedGameRoot "resources\app.asar"
-    $baseHash = ([string]$Script:Manifest.game.baseAsarSha256).ToUpperInvariant()
-    $currentHash = Get-Sha256 -Path $asarPath
+    $fingerprint = Get-ModFingerprint -AsarPath $asarPath
     $state = Get-ExistingState
-    $header = Read-AsarHeader -Path $asarPath
-    $indexBytes = Read-AsarFileBytes -ArchivePath $asarPath -Header $header -InternalPath "AppFiles/index.html"
-    $indexText = (New-Object Text.UTF8Encoding($false)).GetString($indexBytes)
-    $markerFound = $indexText.Contains([string]$Script:Manifest.indexMarker)
 
     Write-Host "Game root: $ResolvedGameRoot"
     Write-Host "ASAR: $asarPath"
-    Write-Host "Current SHA-256: $currentHash"
-    Write-Host "Base SHA-256:    $baseHash"
+    $versionText = "?"
+    if ($fingerprint.GameVersion) { $versionText = $fingerprint.GameVersion }
+    Write-Host ("Game version (version.txt): {0} (mod tested against {1})" -f $versionText, $Script:Manifest.game.expectedVersion)
+    $patchText = "not detected"
+    if ($fingerprint.ZhPatchPresent) { $patchText = "detected" }
+    Write-Host "Chinese patch (index marker): $patchText"
+    $markerText = "none"
+    if ($fingerprint.Marker) { $markerText = $fingerprint.Marker }
+    Write-Host "HoldKeys marker: $markerText"
+    Write-Host ("HoldKeys entries: {0}/3 present" -f $fingerprint.ModEntries.Count)
+    $hookText = "original"
+    if ($fingerprint.MainJsModded) { $hookText = "injected" }
+    Write-Host "main.js hooks: $hookText"
+    if ($fingerprint.MissingHotkeySignatures.Count -gt 0) {
+        Write-Host ("Hotkey signatures missing: " + ($fingerprint.MissingHotkeySignatures -join ", ")) -ForegroundColor Yellow
+    }
     if ($state) {
         Write-Host "State: $Script:StatePath"
-        Write-Host "Recorded status: $($state.status)"
-        if ($state.patchedSha256) { Write-Host "Patched SHA-256: $([string]$state.patchedSha256)" }
-        if ($state.backupPath) { Write-Host "Backup: $([string]$state.backupPath)" }
+        $statusText = "unknown"
+        if ($state.PSObject.Properties["status"] -and $state.status) { $statusText = [string]$state.status }
+        $modVersionText = "?"
+        if ($state.PSObject.Properties["modVersion"] -and $state.modVersion) { $modVersionText = [string]$state.modVersion }
+        Write-Host ("Recorded status: {0} (mod {1})" -f $statusText, $modVersionText)
     }
     else {
         Write-Host "State: not found"
     }
 
-    if ($currentHash -eq $baseHash -and -not $markerFound) {
-        Write-Host "Result: HoldKeys is NOT installed."
+    if ($fingerprint.Marker -eq [string]$Script:Manifest.indexMarker) {
+        $mismatches = @(Get-PayloadMismatches -AsarPath $asarPath -Header $fingerprint.Header)
+        if ($mismatches.Count -eq 0 -and $fingerprint.MainJsModded -and $fingerprint.ModEntries.Count -eq 3) {
+            Write-Host ("Result: HoldKeys {0} is installed and intact." -f $Script:Manifest.modVersion)
+        }
+        else {
+            Write-Host ("Result: HoldKeys marker matches this version, but these entries do not: " +
+                ($mismatches -join ", ") + ". Run Uninstall, then Install.") -ForegroundColor Yellow
+        }
     }
-    elseif ($state -and $state.patchedSha256 -and $currentHash -eq ([string]$state.patchedSha256).ToUpperInvariant() -and $markerFound) {
-        Write-Host "Result: HoldKeys is installed and matches the recorded archive."
+    elseif ($fingerprint.Marker) {
+        Write-Host ("Result: HoldKeys {0} is installed; run Install to upgrade to {1}." -f $fingerprint.Marker, $Script:Manifest.modVersion)
     }
-    elseif ($markerFound) {
-        Write-Host "Result: HoldKeys marker was found, but the archive does not match the recorded installation." -ForegroundColor Yellow
+    elseif ($fingerprint.ModEntries.Count -gt 0 -or $fingerprint.MainJsModded) {
+        Write-Host "Result: HoldKeys remnants were found without a marker. Run Uninstall to clean up." -ForegroundColor Yellow
     }
     else {
-        Write-Host "Result: app.asar is not a supported base or the recorded HoldKeys archive." -ForegroundColor Yellow
+        Write-Host "Result: HoldKeys is NOT installed."
     }
 }
 
 try {
     $Script:Manifest = Read-JsonFile -Path $Script:ManifestPath
-    if ([string]$Script:Manifest.modVersion -ne "1.1.1") {
-        throw "Unsupported mod manifest version."
+    if ([int]$Script:Manifest.schemaVersion -ne 2) {
+        throw "Unsupported mod manifest schema (expected 2)."
+    }
+    if (-not $Script:Manifest.modVersion) {
+        throw "Mod manifest is missing modVersion."
     }
     $resolvedGameRoot = Resolve-GameRoot -RequestedRoot $GameRoot
     switch ($Action) {

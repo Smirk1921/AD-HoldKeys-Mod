@@ -1,23 +1,36 @@
 {
-  "schemaVersion": 1,
-  "modVersion": "1.1.1",
+  "schemaVersion": 2,
+  "modVersion": "1.2.0",
   "displayName": "Antimatter Dimensions HoldKeys Mod",
-  "indexMarker": "AD-HOLDKEYS-MOD:1.1.1",
+  "indexMarker": "AD-HOLDKEYS-MOD:1.2.0",
   "game": {
     "appId": "1399720",
-    "buildId": "16370635",
-    "version": "11.5",
-    "chinesePatchVersion": "0.3.2",
-    "baseAsarSize": 94345724,
-    "baseAsarSha256": "C7380379E1D0B1FA6352BE2316BC2828EC46CCAA606C791399D0449E85C7BEEB"
+    "expectedVersion": "11.5",
+    "expectedBuildId": "16370635",
+    "versionFile": "AppFiles/version.txt"
+  },
+  "compat": {
+    "requiredEntries": [
+      "package.json",
+      "main.js",
+      "preload.js",
+      "AppFiles/index.html",
+      "AppFiles/js/app.js",
+      "AppFiles/js/chunk-vendors.js",
+      "AppFiles/version.txt"
+    ],
+    "hotkeySignatures": [
+      "replicantiGalaxyRequest",
+      "eternityResetRequest",
+      "maxAll",
+      "GameKeyboard"
+    ],
+    "scriptAnchor": "<script defer src=\"js/app.js\"></script>",
+    "styleAnchor": "</head>",
+    "modScriptTag": "<script defer src=\"js/hold-keys.js\"></script>",
+    "modStyleTag": "<link rel=\"stylesheet\" type=\"text/css\" href=\"stylesheets/hold-keys.css\">"
   },
   "payload": [
-    {
-      "source": "payload\\main.js",
-      "archivePath": "main.js",
-      "size": 3427,
-      "sha256": "9DE4C04D79F367C48848B78E0907831C191331D7B037C53011E049CE69A2A1AD"
-    },
     {
       "source": "payload\\hold-keys-main.js",
       "archivePath": "AppFiles/js/hold-keys-main.js",
@@ -27,14 +40,55 @@
     {
       "source": "payload\\hold-keys.js",
       "archivePath": "AppFiles/js/hold-keys.js",
-      "size": 14323,
-      "sha256": "238AE44D56E67DCC4A6B3D7355711BB05E175C5FCDD9DB45CEF21D090AA902AE"
+      "size": 14939,
+      "sha256": "5B3B54BF226A078602414019FD728B40A1DEFD72BD86033EE252C9A4214D302B"
     },
     {
       "source": "payload\\hold-keys.css",
       "archivePath": "AppFiles/stylesheets/hold-keys.css",
-      "size": 5037,
-      "sha256": "6CF4702AFABFCFB2E0DC2CA350A45E84BC7220EA87FD9AE5E6CF7468BD51F559"
+      "size": 6000,
+      "sha256": "7EBEAA0E910FDC4B884F0E761B4A284EA79B1E8DAE7257E5DCD36EF84FA6A504"
     }
-  ]
+  ],
+  "generatedFiles": [
+    {
+      "archivePath": "main.js",
+      "strategy": "inject-holdkeys-main"
+    }
+  ],
+  "originalFiles": [
+    {
+      "source": "payload\\original-main.js",
+      "archivePath": "main.js",
+      "size": 3099,
+      "sha256": "79C67D89E780452EEA26C7781282DA745C327F570DD798452E733B2B284ED8B3"
+    }
+  ],
+  "upgrade": {
+    "knownMarkers": [
+      "AD-HOLDKEYS-MOD:1.1.1"
+    ],
+    "payload": [
+      {
+        "archivePath": "main.js",
+        "size": 3427,
+        "sha256": "9DE4C04D79F367C48848B78E0907831C191331D7B037C53011E049CE69A2A1AD"
+      },
+      {
+        "archivePath": "AppFiles/js/hold-keys-main.js",
+        "size": 2372,
+        "sha256": "7371426000111FDA4B4B334663F0A8A1E4BB9F1B9DF5B1268852F72CA3B45AEF"
+      },
+      {
+        "archivePath": "AppFiles/js/hold-keys.js",
+        "size": 14323,
+        "sha256": "238AE44D56E67DCC4A6B3D7355711BB05E175C5FCDD9DB45CEF21D090AA902AE"
+      },
+      {
+        "archivePath": "AppFiles/stylesheets/hold-keys.css",
+        "size": 5037,
+        "sha256": "6CF4702AFABFCFB2E0DC2CA350A45E84BC7220EA87FD9AE5E6CF7468BD51F559"
+      }
+    ]
+  }
 }

@@ -1,12 +1,6 @@
 // Modules to control application life and create native browser window
 const {app, Menu, BrowserWindow, globalShortcut} = require('electron')
 const path = require('path')
-const holdKeysMain = require('./AppFiles/js/hold-keys-main')
-
-app.commandLine.appendSwitch('disable-background-timer-throttling')
-app.commandLine.appendSwitch('disable-renderer-backgrounding')
-app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
-holdKeysMain.install()
 
 function createWindow () {
   // Create the browser window.
@@ -22,8 +16,6 @@ function createWindow () {
       nativeWindowOpen: true
     }
   })
-
-  holdKeysMain.attachWindow(mainWindow)
 
   // and load the index.html of the app.
   mainWindow.loadFile('AppFiles/index.html')
