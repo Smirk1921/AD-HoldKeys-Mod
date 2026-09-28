@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const MOD_VERSION = "1.2.0";
+  const MOD_VERSION = "1.3.0";
   const INSTALL_FLAG = "__AD_HOLDKEYS_INSTALLED__";
   const STORAGE_KEY = "ad-holdkeys-ui-v2";
   const LEGACY_STORAGE_KEYS = ["ad-holdkeys-ui-v1"];
@@ -9,6 +9,8 @@
   const VIEWPORT_MARGIN = 12;
   const MIN_EXPANDED_WIDTH = 260;
   const MIN_EXPANDED_HEIGHT = 300;
+  const RESTORE_POLL_MS = 200;
+  const RESTORE_TIMEOUT_MS = 60000;
 
   if (globalThis[INSTALL_FLAG]) return;
   globalThis[INSTALL_FLAG] = true;
@@ -79,9 +81,11 @@
   let statusElement;
   let activityDot;
   let collapseButton;
+  let restoreToggleInput;
   let dragState;
   let resizeFrame;
   let ipcRenderer;
+  let suppressPersistence = false;
 
   function readUiState() {
     try {
@@ -161,6 +165,27 @@
     defineEventValue(event, "which", definition.keyCode);
     defineEventValue(event, "charCode", type === "keypress" ? definition.keyCode : 0);
     document.dispatchEvent(event);
+
+    // Mousetrap registers printable-character hotkeys bound without an
+    // explicit action under "keypress" (_pickBestAction), and real key
+    // auto-repeat always accompanies a keydown with a keypress. R is the
+    // only such hotkey among the supported keys, so without this follow-up
+    // keypress the synthetic keydown never triggers it.
+    if (type === "keydown") {
+      const keypressEvent = new KeyboardEvent("keypress", {
+        key: definition.key,
+        code: definition.code,
+        location: 0,
+        repeat: false,
+        bubbles: true,
+        cancelable: true,
+        composed: true
+      });
+      defineEventValue(keypressEvent, "keyCode", definition.keyCode);
+      defineEventValue(keypressEvent, "which", definition.keyCode);
+      defineEventValue(keypressEvent, "charCode", definition.keyCode);
+      document.dispatchEvent(keypressEvent);
+    }
   }
 
   function updatePanel() {
@@ -186,9 +211,67 @@
     }
   }
 
+  // Persists the user's hold intent on every start/stop so a crash or an
+  // unexpected shutdown still restores the same set on the next launch.
+  function persistActiveKeys() {
+    if (suppressPersistence) return;
+    writeUiState({ persistedActiveKeys: [...activeKeys] });
+  }
+
+  function isAutoRestoreEnabled() {
+    return readUiState().autoRestore === true;
+  }
+
+  function setAutoRestore(enabled) {
+    if (enabled) {
+      // Seeding with the currently held keys makes "enable while holding"
+      // behave the way users expect.
+      writeUiState({ autoRestore: true, persistedActiveKeys: [...activeKeys] });
+    }
+    else {
+      writeUiState({ autoRestore: false, persistedActiveKeys: [] });
+    }
+    if (restoreToggleInput) restoreToggleInput.checked = enabled;
+  }
+
+  function gameHotkeyLayerReady() {
+    try {
+      return Boolean(globalThis.ui && globalThis.ui.$viewModel &&
+        globalThis.player && globalThis.player.options);
+    } catch {
+      return false;
+    }
+  }
+
+  function restorePersistedKeys() {
+    const state = readUiState();
+    if (state.autoRestore !== true) return;
+    const persisted = Array.isArray(state.persistedActiveKeys) ? state.persistedActiveKeys : [];
+    const ids = persisted
+      .map(id => definitionsById.get(String(id).toLowerCase()))
+      .filter(definition => definition)
+      .map(definition => definition.id);
+    if (ids.length === 0) return;
+
+    const deadline = Date.now() + RESTORE_TIMEOUT_MS;
+    const attempt = () => {
+      // The user interacted first; their intent wins over the saved one.
+      if (activeKeys.size > 0) return;
+      if (!gameHotkeyLayerReady()) {
+        if (Date.now() < deadline) window.setTimeout(attempt, RESTORE_POLL_MS);
+        return;
+      }
+      for (const id of ids) {
+        startKey(definitionsById.get(id));
+      }
+    };
+    window.setTimeout(attempt, RESTORE_POLL_MS);
+  }
+
   function startKey(definition) {
     if (!definition || activeKeys.has(definition.id)) return;
     activeKeys.add(definition.id);
+    persistActiveKeys();
     updatePanel();
     syncMainHeartbeat();
     dispatchSyntheticKey(definition, "keydown");
@@ -200,6 +283,7 @@
       dispatchSyntheticKey(definition, "keyup");
     } finally {
       activeKeys.delete(definition.id);
+      persistActiveKeys();
       updatePanel();
       syncMainHeartbeat();
     }
@@ -370,6 +454,25 @@
     return button;
   }
 
+  function createRestoreToggle() {
+    const row = document.createElement("label");
+    row.className = "ad-holdkeys__restore";
+    row.title = "开启后，关闭游戏时正在长按的按键会在下次启动游戏时自动恢复";
+
+    restoreToggleInput = document.createElement("input");
+    restoreToggleInput.type = "checkbox";
+    restoreToggleInput.checked = isAutoRestoreEnabled();
+
+    const text = document.createElement("span");
+    text.textContent = "重启游戏后恢复长按";
+
+    row.append(restoreToggleInput, text);
+    restoreToggleInput.addEventListener("change", () => {
+      setAutoRestore(restoreToggleInput.checked);
+    });
+    return row;
+  }
+
   function createPanel() {
     panel = document.createElement("section");
     panel.id = "ad-holdkeys-panel";
@@ -408,6 +511,8 @@
     buttonGrid.className = "ad-holdkeys__grid";
     for (const definition of keyDefinitions) buttonGrid.append(createButton(definition));
 
+    const restoreToggle = createRestoreToggle();
+
     const footer = document.createElement("div");
     footer.className = "ad-holdkeys__footer";
 
@@ -422,7 +527,7 @@
     stopButton.innerHTML = `停止全部 <kbd>${STOP_ALL_CODE}</kbd>`;
 
     footer.append(statusElement, stopButton);
-    body.append(buttonGrid, footer);
+    body.append(buttonGrid, restoreToggle, footer);
     panel.append(header, body);
     document.body.append(panel);
 
@@ -481,7 +586,12 @@
     createPanel();
     window.addEventListener("keydown", handleGlobalKeydown, true);
     window.addEventListener("resize", scheduleRelayout);
-    window.addEventListener("beforeunload", stopAll);
+    window.addEventListener("beforeunload", () => {
+      // Shutdown cleanup must not overwrite what the user asked to restore.
+      suppressPersistence = true;
+      stopAll();
+    });
+    restorePersistedKeys();
   }
 
   globalThis.ADHoldKeys = Object.freeze({
@@ -490,6 +600,8 @@
     stop: key => stopKey(definitionsById.get(String(key).toLowerCase())),
     toggle: key => toggleKey(definitionsById.get(String(key).toLowerCase())),
     stopAll,
+    setAutoRestore: value => setAutoRestore(Boolean(value)),
+    autoRestoreEnabled: () => isAutoRestoreEnabled(),
     setMinimized: value => setPanelMinimized(Boolean(value)),
     relayout: relayoutPanel,
     activeKeys: () => [...activeKeys],

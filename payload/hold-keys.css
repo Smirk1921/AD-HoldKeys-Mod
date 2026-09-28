@@ -157,6 +157,23 @@
   opacity: 0.92;
 }
 
+#ad-holdkeys-panel .ad-holdkeys__restore {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  padding: 0 2px;
+  color: var(--color-text, #4f5957);
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+#ad-holdkeys-panel .ad-holdkeys__restore input {
+  margin: 0;
+  accent-color: var(--color-good, #5ac467);
+  cursor: pointer;
+}
+
 #ad-holdkeys-panel .ad-holdkeys__footer {
   display: flex;
   align-items: center;
