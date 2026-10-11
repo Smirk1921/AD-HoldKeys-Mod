@@ -1,6 +1,6 @@
 @echo off
 setlocal
-chcp 65001 >nul
+chcp 936 >nul
 title Antimatter Dimensions HoldKeys - Install
 
 if not exist "%~dp0Manage-HoldKeys.ps1" goto incomplete
@@ -9,8 +9,8 @@ if not exist "%~dp0payload\hold-keys.js" goto incomplete
 if not exist "%~dp0payload\hold-keys.css" goto incomplete
 if not exist "%~dp0payload\original-main.js" goto incomplete
 
-echo å®‰è£…å‰è¯·å®Œå…¨é€€å‡ºã€Šåç‰©è´¨ç»´åº¦ã€‹ã€‚
-echo å®‰è£…å™¨æŒ‰æ¸¸æˆç»“æ„ç‰¹å¾æ ¡éªŒå…¼å®¹æ€§ï¼Œé¦–æ¬¡å®‰è£…ä¼šé¢å¤–åšä¸€æ¬¡ app.asar å…¨é‡å¤‡ä»½ã€‚
+echo °²×°Ç°ÇëÍêÈ«ÍË³ö¡¶·´ÎïÖÊÎ¬¶È¡·¡£
+echo °²×°Æ÷°´ÓÎÏ·½á¹¹ÌØÕ÷Ğ£Ñé¼æÈİĞÔ£¬Ê×´Î°²×°»á¶îÍâ×öÒ»´Î app.asar È«Á¿±¸·İ¡£
 echo.
 
 if "%~1"=="" (
@@ -20,12 +20,12 @@ if "%~1"=="" (
 )
 set "exitCode=%errorlevel%"
 echo.
-if not "%exitCode%"=="0" echo å®‰è£…å¤±è´¥ï¼Œè¯·æŸ¥çœ‹ä¸Šæ–¹é”™è¯¯ä¿¡æ¯ã€‚è‹¥æç¤ºæ— å†™å…¥æƒé™ï¼Œè¯·å³é”®ä»¥ç®¡ç†å‘˜èº«ä»½è¿è¡Œã€‚
-if "%exitCode%"=="0" echo å®‰è£…æˆåŠŸã€‚è¿›å…¥æ¸¸æˆåå¯ä½¿ç”¨ F6 / F7 / F8 / F9 / F11 / F12ï¼ŒF4 å…¨éƒ¨åœæ­¢ã€‚
+if not "%exitCode%"=="0" echo °²×°Ê§°Ü£¬Çë²é¿´ÉÏ·½´íÎóĞÅÏ¢¡£ÈôÌáÊ¾ÎŞĞ´ÈëÈ¨ÏŞ£¬ÇëÓÒ¼üÒÔ¹ÜÀíÔ±Éí·İÔËĞĞ¡£
+if "%exitCode%"=="0" echo °²×°³É¹¦¡£½øÈëÓÎÏ·ºó¿ÉÊ¹ÓÃ F6 / F7 / F8 / F9 / F11 / F12£¬F4 È«²¿Í£Ö¹¡£
 pause
 exit /b %exitCode%
 
 :incomplete
-echo HoldKeys Mod æ–‡ä»¶ä¸å®Œæ•´ï¼Œè¯·ä¿ç•™å®Œæ•´æ–‡ä»¶å¤¹ç»“æ„ã€‚
+echo HoldKeys Mod ÎÄ¼ş²»ÍêÕû£¬Çë±£ÁôÍêÕûÎÄ¼ş¼Ğ½á¹¹¡£
 pause
 exit /b 2

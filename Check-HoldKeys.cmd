@@ -1,6 +1,6 @@
 @echo off
 setlocal
-chcp 65001 >nul
+chcp 936 >nul
 title Antimatter Dimensions HoldKeys - Check
 
 if not exist "%~dp0Manage-HoldKeys.ps1" goto incomplete
@@ -17,6 +17,6 @@ pause
 exit /b %exitCode%
 
 :incomplete
-echo HoldKeys Mod æ–‡ä»¶ä¸å®Œæ•´ï¼Œè¯·ä¿ç•™å®Œæ•´æ–‡ä»¶å¤¹ç»“æ„ã€‚
+echo HoldKeys Mod ÎÄ¼ş²»ÍêÕû£¬Çë±£ÁôÍêÕûÎÄ¼ş¼Ğ½á¹¹¡£
 pause
 exit /b 2
